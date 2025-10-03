@@ -368,4 +368,4 @@ Default timeout is 30 seconds per command, configurable per request.
 
 ## License
 
-MIT
+BSD 3-Clause License - See [LICENSE](LICENSE) for details.
