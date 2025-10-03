@@ -3,6 +3,7 @@
 import asyncio
 import os
 import re
+import signal
 import subprocess
 import tempfile
 import time
@@ -233,8 +234,11 @@ class ACL2Session:
 
             try:
                 # Send command
-                self.process.stdin.write(f"{command}\n".encode())
-                await self.process.stdin.drain()
+                try:
+                    self.process.stdin.write(f"{command}\n".encode())
+                    await self.process.stdin.drain()
+                except (BrokenPipeError, ConnectionResetError):
+                    return "Error: Session connection lost (broken pipe)"
 
                 # Read response with timeout
                 output_lines = []
@@ -242,8 +246,11 @@ class ACL2Session:
                 marker = f"___MARKER_{uuid.uuid4().hex}_{uuid.uuid4().hex}___"
 
                 # Send a marker to know when we're done
-                self.process.stdin.write(f'(cw "~%{marker}~%")\n'.encode())
-                await self.process.stdin.drain()
+                try:
+                    self.process.stdin.write(f'(cw "~%{marker}~%")\n'.encode())
+                    await self.process.stdin.drain()
+                except (BrokenPipeError, ConnectionResetError):
+                    return "Error: Session connection lost (broken pipe)"
 
                 # SECURITY: Implement true total timeout, not per-line timeout
                 start_time = time.time()
@@ -260,6 +267,8 @@ class ACL2Session:
                                 self.process.stdout.readline(),
                                 timeout=min(remaining, 1.0)
                             )
+                            if not line:  # EOF
+                                return "Error: Session process terminated unexpectedly"
                             decoded_line = line.decode()
                             output_lines.append(decoded_line)
 
@@ -279,6 +288,9 @@ class ACL2Session:
                 self.event_counter += 1
                 return "".join(output_lines).replace(marker, "").strip()
 
+            except (BrokenPipeError, ConnectionResetError):
+                # SECURITY: Don't leak internal details in error messages
+                return "Error: Session connection lost (broken pipe)"
             except Exception:
                 # SECURITY: Don't leak internal details in error messages
                 return "Error: Failed to execute command in session"
@@ -287,9 +299,17 @@ class ACL2Session:
         """Terminate the ACL2 session."""
         try:
             if self.process.stdin:
-                self.process.stdin.write(b"(good-bye)\n")
-                await self.process.stdin.drain()
+                try:
+                    self.process.stdin.write(b"(good-bye)\n")
+                    await self.process.stdin.drain()
+                    self.process.stdin.close()
+                except (BrokenPipeError, ConnectionResetError):
+                    # Process already dead, ignore
+                    pass
             await asyncio.wait_for(self.process.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            self.process.kill()
+            await self.process.wait()
         except Exception:
             self.process.kill()
             await self.process.wait()
@@ -406,8 +426,13 @@ class SessionManager:
             except asyncio.CancelledError:
                 pass
 
-        for session in list(self.sessions.values()):
-            await session.terminate()
+        # Terminate all sessions concurrently to avoid blocking
+        session_list = list(self.sessions.values())
+        if session_list:
+            await asyncio.gather(
+                *[session.terminate() for session in session_list],
+                return_exceptions=True  # Don't let one failure stop others
+            )
         self.sessions.clear()
 
     async def _cleanup_inactive_sessions(self) -> None:
@@ -1433,6 +1458,11 @@ async def run() -> None:
 
 def main() -> None:
     """Main entry point for the server."""
+    # Ignore SIGPIPE to prevent broken pipe errors when clients disconnect
+    # This is safe on Unix-like systems; on Windows SIGPIPE doesn't exist
+    if hasattr(signal, 'SIGPIPE'):
+        signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+
     asyncio.run(run())
 
 

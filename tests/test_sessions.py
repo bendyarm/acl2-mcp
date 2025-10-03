@@ -491,3 +491,113 @@ async def test_restore_nonexistent_checkpoint() -> None:
 
     # Cleanup
     await call_tool("end_session", {"session_id": session_id})
+
+
+@pytest.mark.asyncio
+async def test_broken_pipe_on_send_command() -> None:
+    """Test that BrokenPipeError is handled gracefully when sending commands."""
+    start_result = await call_tool("start_session", {})
+    session_id = start_result[0].text.split("ID: ")[1].strip()
+
+    # Get the session and kill the underlying process to simulate broken pipe
+    session = session_manager.get_session(session_id)
+    assert session is not None
+
+    # Kill the ACL2 process
+    session.process.kill()
+    await session.process.wait()
+
+    # Try to send a command (should get broken pipe error)
+    result = await call_tool("evaluate", {
+        "code": "(+ 1 1)",
+        "session_id": session_id
+    })
+
+    assert len(result) == 1
+    # Should get error message about broken pipe or connection lost
+    assert "broken pipe" in result[0].text.lower() or "connection lost" in result[0].text.lower()
+
+    # Cleanup
+    await call_tool("end_session", {"session_id": session_id})
+
+
+@pytest.mark.asyncio
+async def test_broken_pipe_on_terminate() -> None:
+    """Test that terminating an already-dead session doesn't raise errors."""
+    start_result = await call_tool("start_session", {})
+    session_id = start_result[0].text.split("ID: ")[1].strip()
+
+    # Get the session and kill the underlying process
+    session = session_manager.get_session(session_id)
+    assert session is not None
+
+    # Kill the ACL2 process
+    session.process.kill()
+    await session.process.wait()
+
+    # Terminate should handle the broken pipe gracefully
+    result = await call_tool("end_session", {"session_id": session_id})
+
+    assert len(result) == 1
+    assert "ended successfully" in result[0].text
+
+
+@pytest.mark.asyncio
+async def test_cleanup_all_with_dead_sessions() -> None:
+    """Test that cleanup_all handles sessions with dead processes."""
+    # Start multiple sessions
+    session_ids = []
+    for i in range(3):
+        start_result = await call_tool("start_session", {"name": f"test-{i}"})
+        session_id = start_result[0].text.split("ID: ")[1].strip()
+        session_ids.append(session_id)
+
+    # Kill some of the processes
+    for session_id in session_ids[:2]:
+        session = session_manager.get_session(session_id)
+        if session:
+            session.process.kill()
+            await session.process.wait()
+
+    # cleanup_all should handle this gracefully
+    await session_manager.cleanup_all()
+
+    # Verify all sessions are gone
+    list_result = await call_tool("list_sessions", {})
+    assert "No active sessions" in list_result[0].text
+
+
+@pytest.mark.asyncio
+async def test_eof_detection() -> None:
+    """Test that EOF from session process is detected properly."""
+    start_result = await call_tool("start_session", {})
+    session_id = start_result[0].text.split("ID: ")[1].strip()
+
+    # Get the session
+    session = session_manager.get_session(session_id)
+    assert session is not None
+
+    # Send a command that will cause the process to exit
+    # (good-bye exits ACL2)
+    if session.process.stdin:
+        try:
+            session.process.stdin.write(b"(good-bye)\n")
+            await session.process.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    # Wait a bit for process to exit
+    await asyncio.sleep(0.5)
+
+    # Try to send another command - should detect terminated process
+    result = await call_tool("evaluate", {
+        "code": "(+ 1 1)",
+        "session_id": session_id
+    })
+
+    assert len(result) == 1
+    # Should get error about terminated process or broken pipe
+    assert "terminated" in result[0].text.lower() or "connection lost" in result[0].text.lower() or "broken pipe" in result[0].text.lower()
+
+    # Cleanup
+    await call_tool("end_session", {"session_id": session_id})
