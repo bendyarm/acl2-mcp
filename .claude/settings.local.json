@@ -3,7 +3,11 @@
     "allow": [
       "Bash(source:*)",
       "Bash(mypy:*)",
-      "Bash(pytest:*)"
+      "Bash(pytest:*)",
+      "Bash(python -m mypy:*)",
+      "Bash(python -m pytest tests/ -v)",
+      "Bash(python -m pytest tests/test_sessions.py -v)",
+      "Bash(python -m pytest tests/ -v --tb=short)"
     ],
     "deny": [],
     "ask": []

@@ -4,13 +4,20 @@ A Model Context Protocol (MCP) server that provides tools for interacting with t
 
 ## Features
 
-This MCP server exposes nine tools for working with ACL2:
+This MCP server exposes 15 tools for working with ACL2, including support for persistent sessions that enable incremental development:
+
+### Session Management Tools
+- **start_session**: Create a persistent ACL2 session for incremental development
+- **end_session**: End a persistent session and clean up resources
+- **list_sessions**: List all active sessions with their status
 
 ### Code-based Tools
 - **prove**: Submit ACL2 theorems (defthm) for proof
 - **evaluate**: Evaluate arbitrary ACL2 expressions and definitions
 - **check_syntax**: Check ACL2 code for syntax errors
 - **admit**: Test if an ACL2 event would be admitted without error
+
+All code-based tools support an optional `session_id` parameter for incremental development.
 
 ### File-based Tools
 - **certify_book**: Certify an ACL2 book file (loads and verifies all definitions and theorems)
@@ -20,6 +27,13 @@ This MCP server exposes nine tools for working with ACL2:
 ### Query and Verification Tools
 - **query_event**: Query information about a defined function, theorem, or event (uses :pe)
 - **verify_guards**: Verify guards for a function to ensure efficient execution
+
+### Session State Management Tools
+- **undo**: Undo the last N events in a session
+- **save_checkpoint**: Save a named checkpoint of the current session state
+- **restore_checkpoint**: Restore a session to a previously saved checkpoint
+- **get_world_state**: Display current session state (recent definitions and theorems)
+- **retry_proof**: Retry a failed proof with different hints
 
 ## Prerequisites
 
@@ -77,33 +91,37 @@ Replace `/path/to/acl2-mcp` with the actual path to your installation directory.
 
 ### Configuring in Claude Code
 
-Add this to your Claude Code MCP settings file:
+**Recommended: Using the CLI** (Simplest method)
+
+Claude Code provides a CLI command to add MCP servers:
+
+```bash
+claude mcp add acl2 /path/to/acl2-mcp/venv/bin/acl2-mcp
+```
+
+Replace `/path/to/acl2-mcp` with the actual path to your installation directory.
+
+This will automatically configure the server in your Claude Code settings.
+
+**Alternative: Manual Configuration**
+
+You can also manually edit the Claude Code MCP settings file:
 
 **macOS/Linux**: `~/.config/claude-code/mcp_settings.json`
 **Windows**: `%APPDATA%\claude-code\mcp_settings.json`
 
+**Option 1: Using the installed executable** (Recommended)
 ```json
 {
   "mcpServers": {
     "acl2": {
-      "command": "python",
-      "args": [
-        "-m",
-        "acl2_mcp.server"
-      ],
-      "cwd": "/path/to/acl2-mcp",
-      "env": {
-        "PYTHONPATH": "/path/to/acl2-mcp"
-      }
+      "command": "/path/to/acl2-mcp/venv/bin/acl2-mcp"
     }
   }
 }
 ```
 
-Replace `/path/to/acl2-mcp` with the actual path to your installation directory.
-
-**Note**: Make sure to activate the virtual environment or install the package globally if not using the venv python path directly. Alternatively, you can specify the full path to the venv python:
-
+**Option 2: Using Python module**
 ```json
 {
   "mcpServers": {
@@ -118,9 +136,110 @@ Replace `/path/to/acl2-mcp` with the actual path to your installation directory.
 }
 ```
 
+Replace `/path/to/acl2-mcp` with the actual path to your installation directory.
+
 ### Example Tool Usage
 
-#### Code-based Tools
+#### Persistent Session Workflow (Recommended for Interactive Development)
+
+For incremental development where you build up definitions and theorems step-by-step, use persistent sessions:
+
+**1. Start a session:**
+```
+Tool: start_session
+Arguments:
+  name: "natural-numbers-proof"  (optional, for easy identification)
+
+Returns: Session ID (e.g., "a1b2c3d4-...")
+```
+
+**2. Define functions incrementally:**
+```lisp
+Tool: evaluate
+Arguments:
+  session_id: "a1b2c3d4-..."
+  code: "(defun plus (x y) (if (zp x) y (plus (1- x) (1+ y))))"
+
+Tool: evaluate
+Arguments:
+  session_id: "a1b2c3d4-..."
+  code: "(plus 2 3)"  // Test the function
+```
+
+**3. Build on previous definitions:**
+```lisp
+Tool: evaluate
+Arguments:
+  session_id: "a1b2c3d4-..."
+  code: "(defun times (x y) (if (zp y) 0 (plus x (times x (1- y)))))"
+```
+
+**4. Prove theorems interactively:**
+```lisp
+Tool: prove
+Arguments:
+  session_id: "a1b2c3d4-..."
+  code: "(defthm plus-commutative (equal (plus x y) (plus y x)))"
+```
+
+**5. If proof fails, retry with hints:**
+```lisp
+Tool: retry_proof
+Arguments:
+  session_id: "a1b2c3d4-..."
+  code: "(defthm plus-commutative
+          (equal (plus x y) (plus y x))
+          :hints ((\"Goal\" :induct (plus x y))))"
+```
+
+**6. Save checkpoints before risky steps:**
+```lisp
+Tool: save_checkpoint
+Arguments:
+  session_id: "a1b2c3d4-..."
+  checkpoint_name: "before-induction"
+```
+
+**7. Restore if needed:**
+```lisp
+Tool: restore_checkpoint
+Arguments:
+  session_id: "a1b2c3d4-..."
+  checkpoint_name: "before-induction"
+```
+
+**8. Inspect session state:**
+```lisp
+Tool: get_world_state
+Arguments:
+  session_id: "a1b2c3d4-..."
+  limit: 20  (show last 20 events)
+```
+
+**9. Undo mistakes:**
+```lisp
+Tool: undo
+Arguments:
+  session_id: "a1b2c3d4-..."
+  count: 1  (undo last event)
+```
+
+**10. End session when done:**
+```
+Tool: end_session
+Arguments:
+  session_id: "a1b2c3d4-..."
+```
+
+**Benefits of persistent sessions:**
+- ✅ No need to wrap everything in `progn`
+- ✅ Test functions immediately after defining them
+- ✅ Build complex proofs incrementally
+- ✅ Try different proof strategies without re-submitting entire files
+- ✅ Save/restore checkpoints for experimentation
+- ⚡ Sessions auto-timeout after 30 minutes of inactivity
+
+#### Code-based Tools (One-off Execution)
 
 **Prove a Theorem:**
 ```lisp
@@ -225,14 +344,24 @@ pytest
 
 ## How It Works
 
-The server creates temporary files containing your ACL2 code, executes ACL2 with the code as input, and returns the output. Each tool call:
+The server supports two execution modes:
 
+### One-off Execution (Default)
+When no `session_id` is provided, each tool call:
 1. Writes ACL2 code to a temporary `.lisp` file
-2. Executes ACL2 with the code as input
+2. Starts a fresh ACL2 process with the code as input
 3. Captures and returns stdout/stderr
-4. Cleans up the temporary file
+4. Cleans up the temporary file and terminates ACL2
 
-Default timeout is 30 seconds, configurable per request.
+### Persistent Sessions (Incremental Development)
+When using sessions:
+1. `start_session` creates a long-running ACL2 process with persistent stdin/stdout pipes
+2. Each tool call sends commands to the existing process and reads responses
+3. The ACL2 world state accumulates across multiple commands
+4. Sessions auto-cleanup after 30 minutes of inactivity or when explicitly ended
+5. Up to 50 concurrent sessions are supported
+
+Default timeout is 30 seconds per command, configurable per request.
 
 ## License
 
