@@ -1,5 +1,8 @@
 # Security
 
+> ⚠️ **Early Beta Software**
+> This is an early beta version developed rapidly. While security measures have been implemented and tested, this software has not undergone professional security audit. Use with caution and only with trusted code.
+
 This document describes the security measures implemented in the ACL2 MCP server.
 
 ## Security Model

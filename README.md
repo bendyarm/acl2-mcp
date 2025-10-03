@@ -1,5 +1,8 @@
 # ACL2 MCP Server
 
+> ⚠️ **Early Beta - Development in Progress**
+> This is an early beta version that was rapidly developed. While functional and tested, expect rough edges, potential bugs, and breaking changes. Use at your own risk in production environments.
+
 A Model Context Protocol (MCP) server that provides tools for interacting with the ACL2 theorem prover.
 
 ## Features
