@@ -111,7 +111,7 @@ async def list_tools() -> list[Tool]:
     return [
         Tool(
             name="prove",
-            description="Submit an ACL2 theorem or defthm for proof. Returns the ACL2 output.",
+            description="Submit an ACL2 theorem (defthm) for proof. Use this to prove mathematical properties. Example: (defthm append-nil (implies (true-listp x) (equal (append x nil) x))). The theorem will be proven and added to the ACL2 world. Returns detailed ACL2 proof output.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -130,7 +130,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="evaluate",
-            description="Evaluate arbitrary ACL2 expressions or definitions. Returns the ACL2 output.",
+            description="Evaluate ACL2 expressions or define functions (defun). Use this for: 1) Defining functions, 2) Computing values, 3) Testing expressions. Example: (defun factorial (n) (if (zp n) 1 (* n (factorial (- n 1))))) or (+ 1 2). Returns the ACL2 evaluation result.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -149,7 +149,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="check_syntax",
-            description="Check ACL2 code for syntax errors without executing it.",
+            description="Quickly check ACL2 code for syntax errors without full execution. Use this before 'admit' or 'prove' to catch basic errors. Faster than full evaluation but less thorough.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -163,13 +163,13 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="certify_book",
-            description="Certify an ACL2 book file (.lisp). This loads and verifies all definitions and theorems in the file.",
+            description="Certify an ACL2 book (a collection of definitions and theorems in a .lisp file). This verifies all proofs and creates a certificate for the book. Use this after creating a complete ACL2 book file. IMPORTANT: Provide path WITHOUT the .lisp extension (e.g., 'mybook' not 'mybook.lisp').",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Path to the .lisp file to certify (without .lisp extension)",
+                        "description": "Path to the book WITHOUT .lisp extension. Example: '/path/to/mybook' for file '/path/to/mybook.lisp'",
                     },
                     "timeout": {
                         "type": "number",
@@ -182,17 +182,17 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="include_book",
-            description="Load an ACL2 book file and optionally evaluate additional code.",
+            description="Load a certified ACL2 book to use its definitions and theorems. Use this to import existing ACL2 libraries before proving new theorems. Optionally run additional code after loading. IMPORTANT: Provide path WITHOUT .lisp extension.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Path to the .lisp file to include (without .lisp extension)",
+                        "description": "Path to the book WITHOUT .lisp extension. Example: 'std/lists/append' for ACL2 standard library",
                     },
                     "code": {
                         "type": "string",
-                        "description": "Optional additional ACL2 code to evaluate after including the book",
+                        "description": "Optional ACL2 code to run after loading the book. Example: (thm (equal (+ 1 1) 2))",
                     },
                     "timeout": {
                         "type": "number",
@@ -205,17 +205,17 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="check_theorem",
-            description="Check a specific theorem in an ACL2 file by name. Loads the file and attempts to prove the named theorem.",
+            description="Verify a specific theorem from a file. Use this to re-check a single theorem after making changes, without re-proving everything in the file. The file is loaded first, then the named theorem is proven. File path INCLUDES .lisp extension.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Path to the .lisp file containing the theorem",
+                        "description": "Full path to the .lisp file (WITH extension). Example: '/path/to/theorems.lisp'",
                     },
                     "theorem_name": {
                         "type": "string",
-                        "description": "Name of the theorem to check",
+                        "description": "Exact name of the theorem to check. Example: 'append-associative'",
                     },
                     "timeout": {
                         "type": "number",
@@ -228,13 +228,13 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="admit",
-            description="Test if an ACL2 event (defun, defthm, etc.) would be admitted without error. Returns success/failure without persisting to world.",
+            description="Test if an ACL2 event would be accepted WITHOUT saving it permanently. Use this to validate definitions/theorems before adding them to files. Faster than 'prove' for testing. Returns success/failure. Example use case: testing if a function definition is valid before committing to a file.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "code": {
                         "type": "string",
-                        "description": "ACL2 event to test (e.g., defun or defthm form)",
+                        "description": "Single ACL2 event to test. Example: (defun my-func (x) (+ x 1)) or (defthm my-thm (equal (+ 1 1) 2))",
                     },
                     "timeout": {
                         "type": "number",
@@ -247,17 +247,17 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="query_event",
-            description="Query information about a defined function, theorem, or other event by name. Returns the definition and properties.",
+            description="Look up the definition and properties of an ACL2 function, theorem, or macro. Use this to understand what's already defined before writing new code, or to check the signature of existing functions. Works with built-in ACL2 functions (e.g., 'append', 'len') or user-defined ones. Uses ACL2's :pe (print-event) command.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "Name of the function, theorem, or event to query",
+                        "description": "Name of function/theorem to query. Examples: 'append', 'len', 'my-custom-function'",
                     },
                     "file_path": {
                         "type": "string",
-                        "description": "Optional: file to load first before querying",
+                        "description": "Optional: Load this file first (WITH .lisp extension) before querying. Use if the event is defined in a specific file.",
                     },
                     "timeout": {
                         "type": "number",
@@ -270,17 +270,17 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="verify_guards",
-            description="Verify guards for a function, ensuring it can execute efficiently in raw Lisp.",
+            description="Verify that a function's guards are satisfied, enabling efficient execution in raw Common Lisp. Guards are conditions that ensure a function is called with valid inputs. Use this after defining a function to enable faster execution. Common workflow: 1) Define function with 'evaluate', 2) Verify guards with this tool. Example: After defining (defun my-div (x y) (/ x y)), verify guards to ensure y is never zero.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "function_name": {
                         "type": "string",
-                        "description": "Name of the function to verify guards for",
+                        "description": "Name of the function to verify. Example: 'my-div'",
                     },
                     "file_path": {
                         "type": "string",
-                        "description": "Optional: file containing the function definition to load first",
+                        "description": "Optional: File containing the function (WITH .lisp extension). Load this first before verifying.",
                     },
                     "timeout": {
                         "type": "number",
