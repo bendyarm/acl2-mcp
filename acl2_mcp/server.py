@@ -1,6 +1,8 @@
 """ACL2 MCP Server implementation."""
 
 import asyncio
+import os
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -9,6 +11,95 @@ from typing import Any, Sequence
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
+
+
+# Security constants
+MAX_TIMEOUT = 300  # 5 minutes maximum
+MIN_TIMEOUT = 1
+MAX_CODE_LENGTH = 1_000_000  # 1MB of code
+
+
+def validate_timeout(timeout: int) -> int:
+    """
+    Validate and clamp timeout value.
+
+    Args:
+        timeout: Requested timeout in seconds
+
+    Returns:
+        Validated timeout value
+    """
+    if not isinstance(timeout, (int, float)):
+        return 30
+    return max(MIN_TIMEOUT, min(int(timeout), MAX_TIMEOUT))
+
+
+def validate_acl2_identifier(identifier: str) -> str:
+    """
+    Validate that a string is a safe ACL2 identifier.
+
+    Args:
+        identifier: The identifier to validate
+
+    Returns:
+        The validated identifier
+
+    Raises:
+        ValueError: If identifier is not safe
+    """
+    if not identifier:
+        raise ValueError("Identifier cannot be empty")
+
+    # ACL2 identifiers can contain letters, digits, hyphens, underscores
+    # and some special characters, but should not contain quotes or parens
+    if '"' in identifier or "'" in identifier or "(" in identifier or ")" in identifier:
+        raise ValueError(f"Invalid ACL2 identifier: {identifier}")
+
+    return identifier
+
+
+def escape_acl2_string(s: str) -> str:
+    """
+    Escape a string for safe use in ACL2 code.
+
+    Args:
+        s: String to escape
+
+    Returns:
+        Escaped string safe for use in ACL2
+    """
+    # Escape backslashes first, then quotes
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def validate_file_path(file_path: str) -> Path:
+    """
+    Validate file path and check it exists.
+
+    Args:
+        file_path: Path to validate
+
+    Returns:
+        Resolved absolute path
+
+    Raises:
+        ValueError: If path is invalid or doesn't exist
+    """
+    if not file_path:
+        raise ValueError("File path cannot be empty")
+
+    # Resolve to absolute path
+    abs_path = Path(file_path).resolve()
+
+    # Check that file exists
+    if not abs_path.exists():
+        raise ValueError(f"File not found: {abs_path.name}")
+
+    # Check that it's a file (not a directory)
+    if not abs_path.is_file():
+        raise ValueError(f"Path is not a file: {abs_path.name}")
+
+    return abs_path
 
 
 app: Server = Server("acl2-mcp")
@@ -214,6 +305,12 @@ async def run_acl2(code: str, timeout: int = 30) -> str:
     Returns:
         Output from ACL2
     """
+    # Validate inputs
+    if len(code) > MAX_CODE_LENGTH:
+        return f"Error: Code exceeds maximum length of {MAX_CODE_LENGTH} characters"
+
+    timeout = validate_timeout(timeout)
+
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".lisp", delete=False
     ) as f:
@@ -265,14 +362,16 @@ async def run_acl2_file(file_path: str, timeout: int = 60) -> str:
     Returns:
         Output from ACL2
     """
-    # Normalize path
-    abs_path = Path(file_path).resolve()
+    try:
+        abs_path = validate_file_path(file_path)
+    except ValueError as e:
+        return f"Error: {e}"
 
-    if not abs_path.exists():
-        return f"Error: File not found: {abs_path}"
+    # Escape the path for safe use in ACL2 code
+    escaped_path = escape_acl2_string(str(abs_path))
 
     # Use ld to load the file
-    code = f'(ld "{abs_path}")'
+    code = f'(ld "{escaped_path}")'
     return await run_acl2(code, timeout)
 
 
@@ -289,13 +388,18 @@ async def certify_acl2_book(file_path: str, timeout: int = 120) -> str:
     """
     # Remove .lisp extension if present
     book_path = str(Path(file_path).with_suffix(""))
-    abs_path = Path(book_path).with_suffix(".lisp").resolve()
+    lisp_path = Path(book_path).with_suffix(".lisp")
 
-    if not abs_path.exists():
-        return f"Error: File not found: {abs_path}"
+    try:
+        abs_path = validate_file_path(str(lisp_path))
+    except ValueError as e:
+        return f"Error: {e}"
+
+    # Escape the book path for safe use in ACL2 code
+    escaped_book_path = escape_acl2_string(book_path)
 
     # Use certify-book command
-    code = f'(certify-book "{book_path}" ?)'
+    code = f'(certify-book "{escaped_book_path}" ?)'
     return await run_acl2(code, timeout)
 
 
@@ -313,14 +417,22 @@ async def include_acl2_book(file_path: str, additional_code: str = "", timeout: 
     """
     # Remove .lisp extension if present
     book_path = str(Path(file_path).with_suffix(""))
-    abs_path = Path(book_path).with_suffix(".lisp").resolve()
+    lisp_path = Path(book_path).with_suffix(".lisp")
 
-    if not abs_path.exists():
-        return f"Error: File not found: {abs_path}"
+    try:
+        abs_path = validate_file_path(str(lisp_path))
+    except ValueError as e:
+        return f"Error: {e}"
+
+    # Escape the book path for safe use in ACL2 code
+    escaped_book_path = escape_acl2_string(book_path)
 
     # Build code to include book and run additional commands
-    code = f'(include-book "{book_path}")'
+    code = f'(include-book "{escaped_book_path}")'
     if additional_code.strip():
+        # Validate additional code length
+        if len(additional_code) > MAX_CODE_LENGTH:
+            return f"Error: Additional code exceeds maximum length of {MAX_CODE_LENGTH} characters"
         code += f"\n{additional_code}"
 
     return await run_acl2(code, timeout)
@@ -338,16 +450,25 @@ async def query_acl2_event(name: str, file_path: str = "", timeout: int = 30) ->
     Returns:
         Output from ACL2 showing the event definition and properties
     """
+    # Validate the event name
+    try:
+        validated_name = validate_acl2_identifier(name)
+    except ValueError as e:
+        return f"Error: {e}"
+
     # Build code to load file (if provided) and query the event
     code = ""
     if file_path:
-        abs_path = Path(file_path).resolve()
-        if not abs_path.exists():
-            return f"Error: File not found: {abs_path}"
-        code += f'(ld "{abs_path}")\n'
+        try:
+            abs_path = validate_file_path(file_path)
+        except ValueError as e:
+            return f"Error: {e}"
+
+        escaped_path = escape_acl2_string(str(abs_path))
+        code += f'(ld "{escaped_path}")\n'
 
     # Use :pe (print event) to show the definition
-    code += f":pe {name}"
+    code += f":pe {validated_name}"
 
     return await run_acl2(code, timeout)
 
@@ -364,16 +485,25 @@ async def verify_function_guards(function_name: str, file_path: str = "", timeou
     Returns:
         Output from ACL2
     """
+    # Validate the function name
+    try:
+        validated_name = validate_acl2_identifier(function_name)
+    except ValueError as e:
+        return f"Error: {e}"
+
     # Build code to load file (if provided) and verify guards
     code = ""
     if file_path:
-        abs_path = Path(file_path).resolve()
-        if not abs_path.exists():
-            return f"Error: File not found: {abs_path}"
-        code += f'(ld "{abs_path}")\n'
+        try:
+            abs_path = validate_file_path(file_path)
+        except ValueError as e:
+            return f"Error: {e}"
+
+        escaped_path = escape_acl2_string(str(abs_path))
+        code += f'(ld "{escaped_path}")\n'
 
     # Use verify-guards command
-    code += f"(verify-guards {function_name})"
+    code += f"(verify-guards {validated_name})"
 
     return await run_acl2(code, timeout)
 
@@ -463,18 +593,23 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
         theorem_name = arguments["theorem_name"]
         timeout = arguments.get("timeout", 60)
 
-        # Load the file and then re-prove the specific theorem
-        abs_path = Path(file_path).resolve()
-        if not abs_path.exists():
+        # Validate inputs
+        try:
+            abs_path = validate_file_path(file_path)
+            validated_theorem = validate_acl2_identifier(theorem_name)
+        except ValueError as e:
             return [
                 TextContent(
                     type="text",
-                    text=f"Error: File not found: {abs_path}",
+                    text=f"Error: {e}",
                 )
             ]
 
+        # Escape the path and build code
+        escaped_path = escape_acl2_string(str(abs_path))
+
         # First load the file, then try to prove the theorem by name
-        code = f'(ld "{abs_path}")\n(thm (implies t ({theorem_name})))'
+        code = f'(ld "{escaped_path}")\n(thm (implies t ({validated_theorem})))'
         output = await run_acl2(code, timeout)
 
         return [
