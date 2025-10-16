@@ -41,7 +41,11 @@ All code-based tools support an optional `session_id` parameter for incremental 
 ## Prerequisites
 
 - Python 3.10 or later
-- ACL2 installed and available in PATH
+- ACL2 installed and available in PATH as `acl2`
+  - If installed via package manager (e.g., `brew install acl2`): already configured
+  - If built from source: add `/path/to/acl2/bin` to your PATH (this directory contains the `acl2` wrapper script)
+- ACL2 books build tools (cert.pl) available in PATH
+  - Add `/path/to/acl2/books/build` to your PATH for book certification support
 
 ## Installation
 
@@ -51,7 +55,7 @@ cd acl2-mcp
 
 # Create and activate virtual environment
 python3 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+source venv/bin/activate
 
 # Install the package
 pip install -e .
@@ -61,24 +65,17 @@ pip install -e .
 
 ### Running the Server
 
-The server can be run directly:
+Claude Desktop and Claude Code, when properly configured (see below), will automatically start the server. However, if you want to start it separately for development or testing purposes:
 
 ```bash
 acl2-mcp
 ```
 
-Or via Python:
-
-```bash
-python -m acl2_mcp.server
-```
-
-### Configuring in Claude Desktop
+### Configuring Claude Desktop to use acl2-mcp
 
 Add this to your Claude Desktop configuration file:
 
 **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-**Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
 
 ```json
 {
@@ -92,54 +89,31 @@ Add this to your Claude Desktop configuration file:
 
 Replace `/path/to/acl2-mcp` with the actual path to your installation directory.
 
-### Configuring in Claude Code
+We do not know if Claude Desktop works on Linux, so if you have that
+configuration, you will need to find the appropriate json file and update it
+similarly to the macOS example.
 
-**Recommended: Using the CLI** (Simplest method)
+### Configuring Claude Code to use acl2-mcp
 
-Claude Code provides a CLI command to add MCP servers:
+Claude Code provides a CLI command to add MCP servers. Choose the configuration that fits your workflow:
 
+**Project-specific configuration** (recommended for ACL2 development):
+
+From your ACL2 project directory, run:
 ```bash
 claude mcp add acl2 /path/to/acl2-mcp/venv/bin/acl2-mcp
 ```
 
-Replace `/path/to/acl2-mcp` with the actual path to your installation directory.
+This makes acl2-mcp available only when working in that specific project directory. Good for teams with per-project tool configurations.
 
-This will automatically configure the server in your Claude Code settings.
+**Global configuration** (for system-wide availability):
 
-**Alternative: Manual Configuration**
-
-You can also manually edit the Claude Code MCP settings file:
-
-**macOS/Linux**: `~/.config/claude-code/mcp_settings.json`
-**Windows**: `%APPDATA%\claude-code\mcp_settings.json`
-
-**Option 1: Using the installed executable** (Recommended)
-```json
-{
-  "mcpServers": {
-    "acl2": {
-      "command": "/path/to/acl2-mcp/venv/bin/acl2-mcp"
-    }
-  }
-}
+From any directory, run:
+```bash
+claude mcp add acl2 /path/to/acl2-mcp/venv/bin/acl2-mcp --global
 ```
 
-**Option 2: Using Python module**
-```json
-{
-  "mcpServers": {
-    "acl2": {
-      "command": "/path/to/acl2-mcp/venv/bin/python",
-      "args": [
-        "-m",
-        "acl2_mcp.server"
-      ]
-    }
-  }
-}
-```
-
-Replace `/path/to/acl2-mcp` with the actual path to your installation directory.
+This makes acl2-mcp available in all Claude Code sessions regardless of directory. Good if you want ACL2 tools everywhere.
 
 ### Example Tool Usage
 
@@ -235,6 +209,7 @@ Arguments:
 ```
 
 **Benefits of persistent sessions:**
+
 - ✅ No need to wrap everything in `progn`
 - ✅ Test functions immediately after defining them
 - ✅ Build complex proofs incrementally
