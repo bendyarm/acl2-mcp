@@ -611,6 +611,10 @@ async def list_tools() -> list[Tool]:
                         "description": "Timeout in seconds (default: 60)",
                         "default": 60,
                     },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Optional: ID of persistent session to use. If not provided, creates a fresh ACL2 session for this command only.",
+                    },
                 },
                 "required": ["file_path"],
             },
@@ -916,6 +920,40 @@ async def certify_acl2_book(file_path: str, timeout: int = 120) -> str:
     return await run_acl2(code, timeout)
 
 
+def build_include_book_command(file_path: str, additional_code: str = "") -> tuple[str, str]:
+    """
+    Build include-book command for ACL2.
+
+    Args:
+        file_path: Path to the book (without .lisp extension)
+        additional_code: Optional code to run after including
+
+    Returns:
+        Tuple of (command_string, error_message). If error_message is non-empty, command_string is empty.
+    """
+    # Remove .lisp extension if present
+    book_path = str(Path(file_path).with_suffix(""))
+    lisp_path = Path(book_path).with_suffix(".lisp")
+
+    try:
+        abs_path = validate_file_path(str(lisp_path))
+    except ValueError as e:
+        return "", f"Error: {e}"
+
+    # Escape the book path for safe use in ACL2 code
+    escaped_book_path = escape_acl2_string(book_path)
+
+    # Build code to include book and run additional commands
+    code = f'(include-book "{escaped_book_path}")'
+    if additional_code.strip():
+        # Validate additional code length
+        if len(additional_code) > MAX_CODE_LENGTH:
+            return "", f"Error: Additional code exceeds maximum length of {MAX_CODE_LENGTH} characters"
+        code += f"\n{additional_code}"
+
+    return code, ""
+
+
 async def include_acl2_book(file_path: str, additional_code: str = "", timeout: int = 60) -> str:
     """
     Include an ACL2 book and optionally run additional code.
@@ -928,25 +966,9 @@ async def include_acl2_book(file_path: str, additional_code: str = "", timeout: 
     Returns:
         Output from ACL2
     """
-    # Remove .lisp extension if present
-    book_path = str(Path(file_path).with_suffix(""))
-    lisp_path = Path(book_path).with_suffix(".lisp")
-
-    try:
-        abs_path = validate_file_path(str(lisp_path))
-    except ValueError as e:
-        return f"Error: {e}"
-
-    # Escape the book path for safe use in ACL2 code
-    escaped_book_path = escape_acl2_string(book_path)
-
-    # Build code to include book and run additional commands
-    code = f'(include-book "{escaped_book_path}")'
-    if additional_code.strip():
-        # Validate additional code length
-        if len(additional_code) > MAX_CODE_LENGTH:
-            return f"Error: Additional code exceeds maximum length of {MAX_CODE_LENGTH} characters"
-        code += f"\n{additional_code}"
+    code, error = build_include_book_command(file_path, additional_code)
+    if error:
+        return error
 
     return await run_acl2(code, timeout)
 
@@ -1341,8 +1363,30 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
         file_path = arguments["file_path"]
         additional_code = arguments.get("code", "")
         timeout = arguments.get("timeout", 60)
+        session_id = arguments.get("session_id")
 
-        output = await include_acl2_book(file_path, additional_code, timeout)
+        # Build the command (same logic for both session and non-session)
+        code, error = build_include_book_command(file_path, additional_code)
+        if error:
+            return [
+                TextContent(
+                    type="text",
+                    text=error,
+                )
+            ]
+
+        if session_id:
+            session = session_manager.get_session(session_id)
+            if not session:
+                return [
+                    TextContent(
+                        type="text",
+                        text=f"Error: Session {session_id} not found",
+                    )
+                ]
+            output = await session.send_command(code, timeout)
+        else:
+            output = await run_acl2(code, timeout)
 
         return [
             TextContent(
