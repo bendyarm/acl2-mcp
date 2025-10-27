@@ -21,26 +21,65 @@ from mcp.types import Tool, TextContent
 MAX_TIMEOUT = 300  # 5 minutes maximum
 MIN_TIMEOUT = 1
 MAX_CODE_LENGTH = 1_000_000  # 1MB of code
-SESSION_INACTIVITY_TIMEOUT = 1800  # 30 minutes
+SESSION_INACTIVITY_TIMEOUT = None  # Disabled by default - sessions don't auto-timeout
 MAX_SESSIONS = 50  # Maximum concurrent sessions
 MAX_CHECKPOINT_NAME_LENGTH = 100  # Maximum checkpoint name length
 MAX_CHECKPOINTS_PER_SESSION = 50  # Maximum checkpoints per session
 MAX_SESSION_NAME_LENGTH = 100  # Maximum session name length
 
 
-def validate_timeout(timeout: int) -> int:
+def validate_timeout(timeout: int | None) -> int | None:
     """
     Validate and clamp timeout value.
 
     Args:
-        timeout: Requested timeout in seconds
+        timeout: Requested timeout in seconds, or None for no timeout
 
     Returns:
-        Validated timeout value
+        Validated timeout value, or None for no timeout
     """
+    if timeout is None:
+        return None
     if not isinstance(timeout, (int, float)):
-        return 30
+        return None
     return max(MIN_TIMEOUT, min(int(timeout), MAX_TIMEOUT))
+
+
+def detect_optimal_jobs() -> tuple[int | None, str]:
+    """
+    Detect optimal number of jobs based on CPU count and current load.
+    Works on macOS, Linux, and WSL2.
+
+    Returns:
+        Tuple of (optimal_jobs, info_message)
+        - optimal_jobs: Recommended number of jobs, or None if user should specify
+        - info_message: Information about CPU and load for user
+    """
+    try:
+        # Get total CPU/thread count
+        cpu_count = os.cpu_count()
+        if cpu_count is None:
+            return None, "Unable to determine CPU count"
+
+        # Get current load average (1-minute load)
+        # Works on Unix-like systems: macOS, Linux, WSL2
+        load_avg = os.getloadavg()[0]
+
+        # Calculate available threads
+        available = cpu_count - load_avg
+
+        info = f"System has {cpu_count} threads, current load: {load_avg:.2f}, available: {available:.2f}"
+
+        if available >= 1.0:
+            # Use available threads, rounded down to nearest integer
+            optimal_jobs = max(1, int(available))
+            return optimal_jobs, info
+        else:
+            # Not enough available, ask user
+            return None, info
+
+    except Exception as e:
+        return None, f"Unable to detect system load: {e}"
 
 
 def validate_acl2_identifier(identifier: str) -> str:
@@ -208,13 +247,13 @@ class ACL2Session:
     event_counter: int = 0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
-    async def send_command(self, command: str, timeout: int = 30) -> str:
+    async def send_command(self, command: str, timeout: int | None = None) -> str:
         """
         Send a command to the ACL2 session and get response.
 
         Args:
             command: ACL2 command to execute
-            timeout: Timeout in seconds
+            timeout: Timeout in seconds, or None for no timeout
 
         Returns:
             Output from ACL2
@@ -230,7 +269,7 @@ class ACL2Session:
                 return f"Error: Command exceeds maximum length of {MAX_CODE_LENGTH} characters"
 
             # SECURITY: Validate timeout
-            timeout = validate_timeout(timeout)
+            validated_timeout = validate_timeout(timeout)
 
             try:
                 # Send command
@@ -257,30 +296,51 @@ class ACL2Session:
                 marker_found = False
 
                 try:
-                    while time.time() - start_time < timeout:
-                        remaining = timeout - (time.time() - start_time)
-                        if remaining <= 0:
-                            break
+                    if validated_timeout is None:
+                        # No timeout - loop indefinitely until marker found
+                        while True:
+                            try:
+                                line = await asyncio.wait_for(
+                                    self.process.stdout.readline(),
+                                    timeout=1.0  # Use 1s timeout per line to allow checking for marker
+                                )
+                                if not line:  # EOF
+                                    return "Error: Session process terminated unexpectedly"
+                                decoded_line = line.decode()
+                                output_lines.append(decoded_line)
 
-                        try:
-                            line = await asyncio.wait_for(
-                                self.process.stdout.readline(),
-                                timeout=min(remaining, 1.0)
-                            )
-                            if not line:  # EOF
-                                return "Error: Session process terminated unexpectedly"
-                            decoded_line = line.decode()
-                            output_lines.append(decoded_line)
-
-                            if marker in decoded_line:
-                                marker_found = True
+                                if marker in decoded_line:
+                                    marker_found = True
+                                    break
+                            except asyncio.TimeoutError:
+                                # Continue reading indefinitely
+                                continue
+                    else:
+                        # With timeout - existing logic
+                        while time.time() - start_time < validated_timeout:
+                            remaining = validated_timeout - (time.time() - start_time)
+                            if remaining <= 0:
                                 break
-                        except asyncio.TimeoutError:
-                            # Continue reading until total timeout
-                            continue
 
-                    if not marker_found and (time.time() - start_time) >= timeout:
-                        return f"Error: Command execution timed out after {timeout} seconds"
+                            try:
+                                line = await asyncio.wait_for(
+                                    self.process.stdout.readline(),
+                                    timeout=min(remaining, 1.0)
+                                )
+                                if not line:  # EOF
+                                    return "Error: Session process terminated unexpectedly"
+                                decoded_line = line.decode()
+                                output_lines.append(decoded_line)
+
+                                if marker in decoded_line:
+                                    marker_found = True
+                                    break
+                            except asyncio.TimeoutError:
+                                # Continue reading until total timeout
+                                continue
+
+                        if not marker_found and (time.time() - start_time) >= validated_timeout:
+                            return f"Error: Command execution timed out after {validated_timeout} seconds"
 
                 except Exception:
                     return "Error: Session communication failed"
@@ -447,9 +507,11 @@ class SessionManager:
                 # SECURITY: Create snapshot to avoid race conditions
                 sessions_snapshot = list(self.sessions.items())
 
-                for session_id, session in sessions_snapshot:
-                    if now - session.last_activity > SESSION_INACTIVITY_TIMEOUT:
-                        to_remove.append((session_id, session))
+                # Only cleanup inactive sessions if timeout is enabled
+                if SESSION_INACTIVITY_TIMEOUT is not None:
+                    for session_id, session in sessions_snapshot:
+                        if now - session.last_activity > SESSION_INACTIVITY_TIMEOUT:
+                            to_remove.append((session_id, session))
 
                 # SECURITY: Check if session still exists before removing
                 for session_id, session in to_remove:
@@ -480,7 +542,7 @@ async def list_tools() -> list[Tool]:
     return [
         Tool(
             name="start_session",
-            description="Start a new persistent ACL2 session. This creates a long-running ACL2 process that maintains state across multiple tool calls. Use this when you want to incrementally build up definitions and theorems without having to wrap everything in progn. Sessions auto-timeout after 30 minutes of inactivity.",
+            description="Start a new persistent ACL2 session. This creates a long-running ACL2 process that maintains state across multiple tool calls. Use this when you want to incrementally build up definitions and theorems without having to wrap everything in progn.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -493,7 +555,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="end_session",
-            description="End a persistent ACL2 session and clean up resources. Use this when you're done with incremental development. Sessions also auto-cleanup after 30 minutes of inactivity.",
+            description="End a persistent ACL2 session and clean up resources. Use this when you're done with incremental development.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -525,8 +587,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "timeout": {
                         "type": "number",
-                        "description": "Timeout in seconds (default: 30)",
-                        "default": 30,
+                        "description": "Timeout in seconds (optional, no timeout if not specified)",
                     },
                     "session_id": {
                         "type": "string",
@@ -548,8 +609,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "timeout": {
                         "type": "number",
-                        "description": "Timeout in seconds (default: 30)",
-                        "default": 30,
+                        "description": "Timeout in seconds (optional, no timeout if not specified)",
                     },
                     "session_id": {
                         "type": "string",
@@ -575,18 +635,21 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="certify_book",
-            description="Certify an ACL2 book (a collection of definitions and theorems in a .lisp file). This verifies all proofs and creates a certificate for the book. Use this after creating a complete ACL2 book file. IMPORTANT: Provide path WITHOUT the .lisp extension (e.g., 'mybook' not 'mybook.lisp').",
+            description="Certify ACL2 books using cert.pl with parallel compilation. This verifies all proofs and creates certificates for books. Book path can be relative or absolute, WITHOUT .lisp extension (e.g., 'books/kestrel/axe/top' not 'books/kestrel/axe/top.lisp'). If jobs parameter is not specified, automatically detects optimal number based on CPU count and current system load.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Path to the book WITHOUT .lisp extension. Example: '/path/to/mybook' for file '/path/to/mybook.lisp'",
+                        "description": "Path to the book WITHOUT .lisp extension. Can be relative (e.g., 'books/kestrel/axe/top') or absolute. Relative paths are relative to current directory.",
+                    },
+                    "jobs": {
+                        "type": "number",
+                        "description": "Number of parallel jobs for cert.pl. If not specified, automatically detects based on available CPU threads and current load.",
                     },
                     "timeout": {
                         "type": "number",
-                        "description": "Timeout in seconds (default: 120)",
-                        "default": 120,
+                        "description": "Timeout in seconds (optional, no timeout if not specified)",
                     },
                 },
                 "required": ["file_path"],
@@ -600,7 +663,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Path to the book WITHOUT .lisp extension. Example: 'std/lists/append' for ACL2 standard library",
+                        "description": "Path to the book WITHOUT .lisp extension. Example: 'std/lists/append' for ACL2 standard library, or 'arithmetic/top' for system books",
                     },
                     "code": {
                         "type": "string",
@@ -608,12 +671,16 @@ async def list_tools() -> list[Tool]:
                     },
                     "timeout": {
                         "type": "number",
-                        "description": "Timeout in seconds (default: 60)",
-                        "default": 60,
+                        "description": "Timeout in seconds (optional, no timeout if not specified)",
                     },
                     "session_id": {
                         "type": "string",
                         "description": "Optional: ID of persistent session to use. If not provided, creates a fresh ACL2 session for this command only.",
+                    },
+                    "use_system_dir": {
+                        "type": "boolean",
+                        "description": "If true, use :dir :system for ACL2 system books (books in the ACL2 books directory). Default: false",
+                        "default": False,
                     },
                 },
                 "required": ["file_path"],
@@ -635,8 +702,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "timeout": {
                         "type": "number",
-                        "description": "Timeout in seconds (default: 60)",
-                        "default": 60,
+                        "description": "Timeout in seconds (optional, no timeout if not specified)",
                     },
                 },
                 "required": ["file_path", "theorem_name"],
@@ -654,8 +720,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "timeout": {
                         "type": "number",
-                        "description": "Timeout in seconds (default: 30)",
-                        "default": 30,
+                        "description": "Timeout in seconds (optional, no timeout if not specified)",
                     },
                     "session_id": {
                         "type": "string",
@@ -681,8 +746,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "timeout": {
                         "type": "number",
-                        "description": "Timeout in seconds (default: 30)",
-                        "default": 30,
+                        "description": "Timeout in seconds (optional, no timeout if not specified)",
                     },
                 },
                 "required": ["name"],
@@ -704,8 +768,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "timeout": {
                         "type": "number",
-                        "description": "Timeout in seconds (default: 60)",
-                        "default": 60,
+                        "description": "Timeout in seconds (optional, no timeout if not specified)",
                     },
                 },
                 "required": ["function_name"],
@@ -801,8 +864,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "timeout": {
                         "type": "number",
-                        "description": "Timeout in seconds (default: 60)",
-                        "default": 60,
+                        "description": "Timeout in seconds (optional, no timeout if not specified)",
                     },
                 },
                 "required": ["session_id", "code"],
@@ -811,13 +873,13 @@ async def list_tools() -> list[Tool]:
     ]
 
 
-async def run_acl2(code: str, timeout: int = 30) -> str:
+async def run_acl2(code: str, timeout: int | None = None) -> str:
     """
     Run ACL2 code and return the output.
 
     Args:
         code: ACL2 code to execute
-        timeout: Timeout in seconds
+        timeout: Timeout in seconds, or None for no timeout
 
     Returns:
         Output from ACL2
@@ -826,7 +888,7 @@ async def run_acl2(code: str, timeout: int = 30) -> str:
     if len(code) > MAX_CODE_LENGTH:
         return f"Error: Code exceeds maximum length of {MAX_CODE_LENGTH} characters"
 
-    timeout = validate_timeout(timeout)
+    validated_timeout = validate_timeout(timeout)
 
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".lisp", delete=False
@@ -848,14 +910,18 @@ async def run_acl2(code: str, timeout: int = 30) -> str:
             input_data = f.read()
 
         try:
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(input=input_data.encode()),
-                timeout=timeout
-            )
+            if validated_timeout is None:
+                # No timeout
+                stdout, stderr = await process.communicate(input=input_data.encode())
+            else:
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(input=input_data.encode()),
+                    timeout=validated_timeout
+                )
         except asyncio.TimeoutError:
             process.kill()
             await process.wait()
-            return f"Error: ACL2 execution timed out after {timeout} seconds"
+            return f"Error: ACL2 execution timed out after {validated_timeout} seconds"
 
         output = stdout.decode()
         if stderr:
@@ -868,13 +934,13 @@ async def run_acl2(code: str, timeout: int = 30) -> str:
         Path(temp_file).unlink(missing_ok=True)
 
 
-async def run_acl2_file(file_path: str, timeout: int = 60) -> str:
+async def run_acl2_file(file_path: str, timeout: int | None = None) -> str:
     """
     Run ACL2 with a file using ld (load).
 
     Args:
         file_path: Path to the ACL2 file
-        timeout: Timeout in seconds
+        timeout: Timeout in seconds, or None for no timeout
 
     Returns:
         Output from ACL2
@@ -892,59 +958,116 @@ async def run_acl2_file(file_path: str, timeout: int = 60) -> str:
     return await run_acl2(code, timeout)
 
 
-async def certify_acl2_book(file_path: str, timeout: int = 120) -> str:
+async def certify_acl2_book(file_path: str, timeout: int | None = None, jobs: int = 12) -> str:
     """
-    Certify an ACL2 book.
+    Certify an ACL2 book using cert.pl.
 
     Args:
-        file_path: Path to the book (without .lisp extension)
-        timeout: Timeout in seconds
+        file_path: Path to the book (can be relative or absolute, without .lisp extension)
+        timeout: Timeout in seconds (None = no timeout)
+        jobs: Number of parallel jobs for cert.pl (default: 12)
 
     Returns:
-        Output from ACL2
+        Success/failure message with error details if failed
     """
     # Remove .lisp extension if present
     book_path = str(Path(file_path).with_suffix(""))
-    lisp_path = Path(book_path).with_suffix(".lisp")
 
+    # Build cert.pl command with -j flag
+    cmd_args = ["cert.pl", f"-j{jobs}", book_path]
+
+    # Use cert.pl to certify the book
     try:
-        abs_path = validate_file_path(str(lisp_path))
-    except ValueError as e:
-        return f"Error: {e}"
+        process = await asyncio.create_subprocess_exec(
+            *cmd_args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,  # Combine stderr into stdout
+        )
 
-    # Escape the book path for safe use in ACL2 code
-    escaped_book_path = escape_acl2_string(book_path)
+        try:
+            if timeout is not None:
+                stdout, _ = await asyncio.wait_for(
+                    process.communicate(),
+                    timeout=timeout
+                )
+            else:
+                stdout, _ = await process.communicate()
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+            return f"Error: cert.pl execution timed out after {timeout} seconds"
 
-    # Use certify-book command
-    code = f'(certify-book "{escaped_book_path}" ?)'
-    return await run_acl2(code, timeout)
+        output = stdout.decode()
+        exit_code = process.returncode
+
+        # Check for success: exit code 0 AND no "***" in output
+        has_error_marker = "***" in output
+
+        if exit_code == 0 and not has_error_marker:
+            return "Success: Book certification completed successfully"
+        else:
+            # Certification failed - extract error details
+            error_msg = "Error: Book certification failed\n\n"
+
+            if exit_code != 0:
+                error_msg += f"Exit code: {exit_code}\n\n"
+
+            if has_error_marker:
+                error_msg += "Error markers found in output:\n"
+                # Extract lines containing "***"
+                error_lines = [line for line in output.split('\n') if '***' in line]
+                error_msg += '\n'.join(error_lines[:20])  # Limit to first 20 error lines
+                if len(error_lines) > 20:
+                    error_msg += f"\n... and {len(error_lines) - 20} more error lines"
+            else:
+                # No error markers but non-zero exit - show last 50 lines
+                lines = output.split('\n')
+                error_msg += "Last 50 lines of output:\n"
+                error_msg += '\n'.join(lines[-50:])
+
+            return error_msg
+
+    except FileNotFoundError:
+        return "Error: cert.pl not found in PATH. Make sure ACL2 books build tools are installed."
+    except Exception as e:
+        return f"Error: Failed to run cert.pl: {e}"
 
 
-def build_include_book_command(file_path: str, additional_code: str = "") -> tuple[str, str]:
+def build_include_book_command(file_path: str, additional_code: str = "", use_system_dir: bool = False) -> tuple[str, str]:
     """
     Build include-book command for ACL2.
 
     Args:
         file_path: Path to the book (without .lisp extension)
         additional_code: Optional code to run after including
+        use_system_dir: If True, use :dir :system for ACL2 system books
 
     Returns:
         Tuple of (command_string, error_message). If error_message is non-empty, command_string is empty.
     """
     # Remove .lisp extension if present
     book_path = str(Path(file_path).with_suffix(""))
-    lisp_path = Path(book_path).with_suffix(".lisp")
 
-    try:
-        abs_path = validate_file_path(str(lisp_path))
-    except ValueError as e:
-        return "", f"Error: {e}"
-
-    # Escape the book path for safe use in ACL2 code
-    escaped_book_path = escape_acl2_string(book_path)
+    # Only validate file existence when not using :dir :system
+    # When :dir :system is used, ACL2 will handle path resolution from its books directory
+    if not use_system_dir:
+        lisp_path = Path(book_path).with_suffix(".lisp")
+        try:
+            abs_path = validate_file_path(str(lisp_path))
+            # Use absolute path for non-system books
+            escaped_book_path = escape_acl2_string(str(abs_path.with_suffix("")))
+        except ValueError as e:
+            return "", f"Error: {e}"
+    else:
+        # For system books, use the path as-is (relative to ACL2's books directory)
+        escaped_book_path = escape_acl2_string(book_path)
 
     # Build code to include book and run additional commands
-    code = f'(include-book "{escaped_book_path}")'
+    if use_system_dir:
+        code = f'(include-book "{escaped_book_path}" :dir :system)'
+    else:
+        code = f'(include-book "{escaped_book_path}")'
+
     if additional_code.strip():
         # Validate additional code length
         if len(additional_code) > MAX_CODE_LENGTH:
@@ -954,33 +1077,34 @@ def build_include_book_command(file_path: str, additional_code: str = "") -> tup
     return code, ""
 
 
-async def include_acl2_book(file_path: str, additional_code: str = "", timeout: int = 60) -> str:
+async def include_acl2_book(file_path: str, additional_code: str = "", timeout: int | None = None, use_system_dir: bool = False) -> str:
     """
     Include an ACL2 book and optionally run additional code.
 
     Args:
         file_path: Path to the book (without .lisp extension)
         additional_code: Optional code to run after including
-        timeout: Timeout in seconds
+        timeout: Timeout in seconds, or None for no timeout
+        use_system_dir: If True, use :dir :system for ACL2 system books
 
     Returns:
         Output from ACL2
     """
-    code, error = build_include_book_command(file_path, additional_code)
+    code, error = build_include_book_command(file_path, additional_code, use_system_dir)
     if error:
         return error
 
     return await run_acl2(code, timeout)
 
 
-async def query_acl2_event(name: str, file_path: str = "", timeout: int = 30) -> str:
+async def query_acl2_event(name: str, file_path: str = "", timeout: int | None = None) -> str:
     """
     Query information about an ACL2 event (function, theorem, etc.).
 
     Args:
         name: Name of the event to query
         file_path: Optional file to load first
-        timeout: Timeout in seconds
+        timeout: Timeout in seconds, or None for no timeout
 
     Returns:
         Output from ACL2 showing the event definition and properties
@@ -1008,14 +1132,14 @@ async def query_acl2_event(name: str, file_path: str = "", timeout: int = 30) ->
     return await run_acl2(code, timeout)
 
 
-async def verify_function_guards(function_name: str, file_path: str = "", timeout: int = 60) -> str:
+async def verify_function_guards(function_name: str, file_path: str = "", timeout: int | None = None) -> str:
     """
     Verify guards for a function.
 
     Args:
         function_name: Name of the function
         file_path: Optional file containing the function
-        timeout: Timeout in seconds
+        timeout: Timeout in seconds, or None for no timeout
 
     Returns:
         Output from ACL2
@@ -1246,7 +1370,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
     elif name == "retry_proof":
         session_id = arguments["session_id"]
         code = arguments["code"]
-        timeout = arguments.get("timeout", 60)
+        timeout = arguments.get("timeout")
 
         session = session_manager.get_session(session_id)
         if not session:
@@ -1274,7 +1398,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
 
     elif name == "prove":
         code = arguments["code"]
-        timeout = arguments.get("timeout", 30)
+        timeout = arguments.get("timeout")
         session_id = arguments.get("session_id")
 
         if session_id:
@@ -1299,7 +1423,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
 
     elif name == "evaluate":
         code = arguments["code"]
-        timeout = arguments.get("timeout", 30)
+        timeout = arguments.get("timeout")
         session_id = arguments.get("session_id")
 
         if session_id:
@@ -1348,9 +1472,35 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
 
     elif name == "certify_book":
         file_path = arguments["file_path"]
-        timeout = arguments.get("timeout", 120)
+        timeout = arguments.get("timeout")
 
-        output = await certify_acl2_book(file_path, timeout)
+        # Determine number of jobs
+        if "jobs" in arguments:
+            # User explicitly specified jobs
+            jobs = arguments["jobs"]
+        else:
+            # Auto-detect optimal jobs based on system load
+            optimal_jobs, info = detect_optimal_jobs()
+            if optimal_jobs is not None:
+                jobs = optimal_jobs
+                # Prepend info to output
+                output = await certify_acl2_book(file_path, timeout, jobs)
+                return [
+                    TextContent(
+                        type="text",
+                        text=f"Auto-detected jobs: {jobs} ({info})\n\n{output}",
+                    )
+                ]
+            else:
+                # Unable to auto-detect or insufficient resources
+                return [
+                    TextContent(
+                        type="text",
+                        text=f"Unable to auto-detect optimal job count.\n{info}\n\nPlease retry with explicit 'jobs' parameter.",
+                    )
+                ]
+
+        output = await certify_acl2_book(file_path, timeout, jobs)
 
         return [
             TextContent(
@@ -1362,11 +1512,12 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
     elif name == "include_book":
         file_path = arguments["file_path"]
         additional_code = arguments.get("code", "")
-        timeout = arguments.get("timeout", 60)
+        timeout = arguments.get("timeout")
         session_id = arguments.get("session_id")
+        use_system_dir = arguments.get("use_system_dir", False)
 
         # Build the command (same logic for both session and non-session)
-        code, error = build_include_book_command(file_path, additional_code)
+        code, error = build_include_book_command(file_path, additional_code, use_system_dir)
         if error:
             return [
                 TextContent(
@@ -1398,7 +1549,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
     elif name == "check_theorem":
         file_path = arguments["file_path"]
         theorem_name = arguments["theorem_name"]
-        timeout = arguments.get("timeout", 60)
+        timeout = arguments.get("timeout")
 
         # Validate inputs
         try:
@@ -1428,7 +1579,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
 
     elif name == "admit":
         code = arguments["code"]
-        timeout = arguments.get("timeout", 30)
+        timeout = arguments.get("timeout")
         session_id = arguments.get("session_id")
 
         if session_id:
@@ -1457,7 +1608,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
     elif name == "query_event":
         name_arg = arguments["name"]
         file_path = arguments.get("file_path", "")
-        timeout = arguments.get("timeout", 30)
+        timeout = arguments.get("timeout")
 
         output = await query_acl2_event(name_arg, file_path, timeout)
 
@@ -1471,7 +1622,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
     elif name == "verify_guards":
         function_name = arguments["function_name"]
         file_path = arguments.get("file_path", "")
-        timeout = arguments.get("timeout", 60)
+        timeout = arguments.get("timeout")
 
         output = await verify_function_guards(function_name, file_path, timeout)
 

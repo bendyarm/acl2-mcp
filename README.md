@@ -259,6 +259,15 @@ Arguments:
   file_path: "path/to/mybook"  (without .lisp extension)
   code: "(thm (equal (+ 1 1) 2))"  (optional)
   timeout: 60  (optional)
+  use_system_dir: true  (optional, use :dir :system for ACL2 system books)
+```
+
+For system books (books in the ACL2 books directory), set `use_system_dir: true`:
+```
+Tool: include_book
+Arguments:
+  file_path: "arithmetic/top"
+  use_system_dir: true
 ```
 
 **Check a Specific Theorem:**
