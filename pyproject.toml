@@ -37,3 +37,6 @@ disallow_untyped_defs = true
 
 [project.scripts]
 acl2-mcp = "acl2_mcp.server:main"
+
+[tool.setuptools.package-data]
+acl2_mcp = ["*.sh"]

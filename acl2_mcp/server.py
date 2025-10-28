@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import platform
 import re
 import signal
 import subprocess
@@ -9,7 +10,7 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Sequence, Optional
+from typing import Any, Sequence, Optional, IO
 from dataclasses import dataclass, field
 
 from mcp.server import Server
@@ -246,6 +247,8 @@ class ACL2Session:
     checkpoints: dict[str, SessionCheckpoint] = field(default_factory=dict)
     event_counter: int = 0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    log_file: Optional[Path] = None
+    log_handle: Optional[IO[str]] = None
 
     async def send_command(self, command: str, timeout: int | None = None) -> str:
         """
@@ -272,6 +275,12 @@ class ACL2Session:
             validated_timeout = validate_timeout(timeout)
 
             try:
+                # Log input
+                if self.log_handle:
+                    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+                    self.log_handle.write(f"\n[{timestamp}] >>> INPUT >>>\n{command}\n")
+                    self.log_handle.flush()
+
                 # Send command
                 try:
                     self.process.stdin.write(f"{command}\n".encode())
@@ -346,7 +355,15 @@ class ACL2Session:
                     return "Error: Session communication failed"
 
                 self.event_counter += 1
-                return "".join(output_lines).replace(marker, "").strip()
+                output = "".join(output_lines).replace(marker, "").strip()
+
+                # Log output
+                if self.log_handle:
+                    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+                    self.log_handle.write(f"\n[{timestamp}] <<< OUTPUT <<<\n{output}\n")
+                    self.log_handle.flush()
+
+                return output
 
             except (BrokenPipeError, ConnectionResetError):
                 # SECURITY: Don't leak internal details in error messages
@@ -373,6 +390,65 @@ class ACL2Session:
         except Exception:
             self.process.kill()
             await self.process.wait()
+        finally:
+            # Close log file if open
+            if self.log_handle:
+                try:
+                    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+                    self.log_handle.write(f"\n{'='*60}\n")
+                    self.log_handle.write(f"Session ended: {timestamp}\n")
+                    self.log_handle.write(f"{'='*60}\n")
+                    self.log_handle.close()
+                except Exception:
+                    # Ignore errors closing log file
+                    pass
+
+
+def open_log_viewer(log_file: Path, lines: int = 50) -> None:
+    """
+    Open a terminal window showing tail -f of the log file.
+
+    Args:
+        log_file: Path to the log file to view
+        lines: Number of lines to show initially (default: 50)
+    """
+    system = platform.system()
+
+    try:
+        if system == "Darwin":  # macOS
+            # Use osascript to open Terminal.app in a new window
+            script = f'''
+tell application "Terminal"
+    set newWindow to do script "tail -n {lines} -f '{log_file}'"
+    set custom title of front window to "ACL2 Session Log"
+    activate
+end tell
+'''
+            subprocess.Popen(["osascript", "-e", script])
+
+        elif system == "Linux":
+            # Try different terminal emulators
+            terminals = [
+                ["gnome-terminal", "--", "tail", f"-n{lines}", "-f", str(log_file)],
+                ["xterm", "-e", "tail", f"-n{lines}", "-f", str(log_file)],
+                ["konsole", "-e", "tail", f"-n{lines}", "-f", str(log_file)],
+            ]
+            for cmd in terminals:
+                try:
+                    subprocess.Popen(cmd)
+                    break
+                except FileNotFoundError:
+                    continue
+
+        elif system == "Windows":
+            # Use PowerShell
+            cmd = f'powershell -Command "Get-Content -Path \'{log_file}\' -Wait -Tail {lines}"'
+            subprocess.Popen(["cmd", "/c", "start", "cmd", "/k", cmd])
+
+    except Exception:
+        # Silently fail if we can't open the viewer
+        # The log file will still be created and can be viewed manually
+        pass
 
 
 class SessionManager:
@@ -382,12 +458,21 @@ class SessionManager:
         self.sessions: dict[str, ACL2Session] = {}
         self._cleanup_task: Optional[asyncio.Task[None]] = None
 
-    async def start_session(self, name: Optional[str] = None) -> tuple[str, str]:
+    async def start_session(
+        self,
+        name: Optional[str] = None,
+        enable_logging: bool = True,
+        enable_log_viewer: bool = False,
+        log_tail_lines: int = 50
+    ) -> tuple[str, str]:
         """
         Start a new persistent ACL2 session.
 
         Args:
             name: Optional human-readable name for the session
+            enable_logging: If True, log all I/O to a session file (default: True)
+            enable_log_viewer: If True, open a terminal window showing the log (default: False)
+            log_tail_lines: Number of lines to show in log viewer (default: 50)
 
         Returns:
             Tuple of (session_id, message)
@@ -405,8 +490,11 @@ class SessionManager:
         session_id = str(uuid.uuid4())
 
         try:
+            # Use wrapper script that handles TTY disconnect gracefully
+            # This prevents nested error backtraces when stdin closes unexpectedly
+            wrapper_script = Path(__file__).parent / "acl2-wrapper.sh"
             process = await asyncio.create_subprocess_exec(
-                "acl2",
+                str(wrapper_script),
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -420,13 +508,72 @@ class SessionManager:
                 last_activity=time.time(),
             )
 
+            # Wait for ACL2 to start up and print its banner
+            # Read until we see the first prompt "ACL2 !>"
+            startup_output = []
+            try:
+                while True:
+                    line = await asyncio.wait_for(
+                        process.stdout.readline(),
+                        timeout=10.0  # 10 second timeout for startup
+                    )
+                    if not line:
+                        break
+                    decoded = line.decode()
+                    startup_output.append(decoded)
+                    if "ACL2 !>" in decoded:
+                        break
+            except asyncio.TimeoutError:
+                pass  # Continue even if we timeout
+
+            # Set up logging if enabled
+            if enable_logging:
+                # Create log directory
+                log_dir = Path.home() / ".acl2-mcp" / "sessions"
+                log_dir.mkdir(parents=True, exist_ok=True)
+
+                # Create log file with timestamp in name for uniqueness
+                timestamp = time.strftime("%Y%m%d-%H%M%S")
+                log_filename = f"{session_id}-{timestamp}.log"
+                log_file = log_dir / log_filename
+
+                # Open log file with line buffering
+                log_handle = open(log_file, "a", buffering=1)
+
+                # Write header
+                header_time = time.strftime("%Y-%m-%d %H:%M:%S")
+                log_handle.write(f"{'='*60}\n")
+                log_handle.write(f"ACL2 Session Log\n")
+                log_handle.write(f"Session started: {header_time}\n")
+                log_handle.write(f"Session ID: {session_id}\n")
+                if name:
+                    log_handle.write(f"Session name: {name}\n")
+                log_handle.write(f"{'='*60}\n\n")
+
+                # Write startup banner
+                if startup_output:
+                    log_handle.write(f"[{header_time}] ACL2 Startup:\n")
+                    log_handle.writelines(startup_output)
+                    log_handle.write("\n")
+                log_handle.flush()
+
+                session.log_file = log_file
+                session.log_handle = log_handle
+
+                # Open log viewer if requested
+                if enable_log_viewer:
+                    open_log_viewer(log_file, log_tail_lines)
+
             self.sessions[session_id] = session
 
             # Start cleanup task if not already running
             if self._cleanup_task is None:
                 self._cleanup_task = asyncio.create_task(self._cleanup_inactive_sessions())
 
-            return session_id, f"Session started successfully. ID: {session_id}"
+            message = f"Session started successfully. ID: {session_id}"
+            if enable_logging:
+                message += f"\nLog file: {session.log_file}"
+            return session_id, message
 
         except Exception:
             # SECURITY: Don't leak internal error details
@@ -549,6 +696,21 @@ async def list_tools() -> list[Tool]:
                     "name": {
                         "type": "string",
                         "description": "Optional human-readable name for the session. Example: 'natural-numbers-proof'",
+                    },
+                    "enable_logging": {
+                        "type": "boolean",
+                        "description": "If true, log all I/O to a session file in ~/.acl2-mcp/sessions/ (default: true)",
+                        "default": True,
+                    },
+                    "enable_log_viewer": {
+                        "type": "boolean",
+                        "description": "If true, open a terminal window showing the session log (default: true)",
+                        "default": True,
+                    },
+                    "log_tail_lines": {
+                        "type": "number",
+                        "description": "Number of lines to show in log viewer (default: 50)",
+                        "default": 50,
                     },
                 },
             },
@@ -1172,7 +1334,15 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
     """Handle tool calls."""
     if name == "start_session":
         session_name = arguments.get("name")
-        session_id, message = await session_manager.start_session(session_name)
+        enable_logging = arguments.get("enable_logging", True)
+        enable_log_viewer = arguments.get("enable_log_viewer", True)
+        log_tail_lines = arguments.get("log_tail_lines", 50)
+        session_id, message = await session_manager.start_session(
+            session_name,
+            enable_logging,
+            enable_log_viewer,
+            log_tail_lines
+        )
         return [
             TextContent(
                 type="text",
