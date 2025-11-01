@@ -463,7 +463,8 @@ class SessionManager:
         name: Optional[str] = None,
         enable_logging: bool = True,
         enable_log_viewer: bool = False,
-        log_tail_lines: int = 50
+        log_tail_lines: int = 50,
+        cwd: Optional[str] = None
     ) -> tuple[str, str]:
         """
         Start a new persistent ACL2 session.
@@ -473,6 +474,7 @@ class SessionManager:
             enable_logging: If True, log all I/O to a session file (default: True)
             enable_log_viewer: If True, open a terminal window showing the log (default: False)
             log_tail_lines: Number of lines to show in log viewer (default: 50)
+            cwd: Optional working directory for the ACL2 process (default: None, uses current directory)
 
         Returns:
             Tuple of (session_id, message)
@@ -498,6 +500,7 @@ class SessionManager:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                cwd=cwd,
             )
 
             session = ACL2Session(
@@ -711,6 +714,10 @@ async def list_tools() -> list[Tool]:
                         "type": "number",
                         "description": "Number of lines to show in log viewer (default: 50)",
                         "default": 50,
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "Optional working directory for the ACL2 process. If not specified, uses the current directory. Example: '/Users/user/acl2/books/kestrel/axe/x86/examples/switch'",
                     },
                 },
             },
@@ -1337,11 +1344,13 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
         enable_logging = arguments.get("enable_logging", True)
         enable_log_viewer = arguments.get("enable_log_viewer", True)
         log_tail_lines = arguments.get("log_tail_lines", 50)
+        cwd = arguments.get("cwd")
         session_id, message = await session_manager.start_session(
             session_name,
             enable_logging,
             enable_log_viewer,
-            log_tail_lines
+            log_tail_lines,
+            cwd
         )
         return [
             TextContent(
