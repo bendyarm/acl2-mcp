@@ -1,12 +1,19 @@
 """ACL2 MCP Server implementation."""
 
+import aiofiles
 import asyncio
+import errno
+import fcntl
 import os
 import platform
+import pty
 import re
 import signal
+import struct
 import subprocess
+import sys
 import tempfile
+import termios
 import time
 import uuid
 from pathlib import Path
@@ -27,6 +34,24 @@ MAX_SESSIONS = 50  # Maximum concurrent sessions
 MAX_CHECKPOINT_NAME_LENGTH = 100  # Maximum checkpoint name length
 MAX_CHECKPOINTS_PER_SESSION = 50  # Maximum checkpoints per session
 MAX_SESSION_NAME_LENGTH = 100  # Maximum session name length
+
+
+# Prompt patterns for detecting command completion
+# Based on Emacs emacs-acl2.el *acl2-insert-pats*
+PROMPT_PATTERNS = [
+    re.compile(r'.*>[ ]*$'),      # ACL2, GCL, CLISP, LispWorks, CCL debugger
+    re.compile(r'.*\] $'),        # SBCL debugger
+    re.compile(r'.*\* $'),        # CMUCL, SBCL
+]
+# Other Lisp prompts not included: ".*[?] $" (CCL), ".*): $" (Allegro CL)
+
+
+def matches_prompt_pattern(text: str) -> bool:
+    """Check if text matches any known prompt pattern."""
+    for pattern in PROMPT_PATTERNS:
+        if pattern.match(text):
+            return True
+    return False
 
 
 def validate_timeout(timeout: int | None) -> int | None:
@@ -238,7 +263,20 @@ class SessionCheckpoint:
 
 @dataclass
 class ACL2Session:
-    """Represents a persistent ACL2 session."""
+    """
+    Represents a persistent ACL2 session with background I/O handling via PTY.
+
+    Architecture:
+    - Uses a pseudo-terminal (pty) for bidirectional communication with ACL2
+    - Event-driven reader (loop.add_reader) continuously reads from pty master
+    - Raw bytes are written to a rolling ring buffer for pattern matching
+    - Lines are tagged with monotonic timestamps and sequence IDs
+    - A merge queue collects all output lines
+    - A logger task writes lines to the log file in timestamp order
+    - send_command waits for prompts by checking the ring buffer
+    - PTY makes SBCL think it's interactive, ensuring unbuffered output
+    - Matches Emacs shell-mode behavior (echoed input, prompts, carriage returns)
+    """
     session_id: str
     name: Optional[str]
     process: asyncio.subprocess.Process
@@ -250,9 +288,31 @@ class ACL2Session:
     log_file: Optional[Path] = None
     log_handle: Optional[IO[str]] = None
 
+    # PTY infrastructure
+    master_fd: Optional[int] = None
+    reader_handle: Optional[asyncio.Handle] = None
+    ring_buffer: bytearray = field(default_factory=bytearray)
+    max_ring_buffer_size: int = 65536  # 64KB rolling buffer
+
+    # Background I/O infrastructure
+    merge_queue: asyncio.Queue[tuple[float, int, str, str]] = field(default_factory=lambda: asyncio.Queue(maxsize=10000))  # (timestamp, seq_id, stream_type, line)
+    output_buffer: list[str] = field(default_factory=list)  # Logged output for send_command to search
+    sequence_counter: int = 0  # Atomic counter for tie-breaking
+    sequence_lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # Protects sequence_counter
+
+    # Background task references
+    # Note: stdout_reader_task is replaced by reader_handle (event-driven callback)
+    logger_task: Optional[asyncio.Task[None]] = None
+
+    # Shutdown coordination
+    shutdown_event: asyncio.Event = field(default_factory=asyncio.Event)
+
     async def send_command(self, command: str, timeout: int | None = None) -> str:
         """
         Send a command to the ACL2 session and get response.
+
+        Uses background logging infrastructure - does not read from stdout directly.
+        Instead, waits for prompt to appear in the output_buffer populated by logger task.
 
         Args:
             command: ACL2 command to execute
@@ -264,8 +324,8 @@ class ACL2Session:
         async with self.lock:
             self.last_activity = time.time()
 
-            if self.process.stdin is None or self.process.stdout is None:
-                return "Error: Session process has no stdin/stdout"
+            if self.master_fd is None:
+                return "Error: Session PTY master is not available"
 
             # SECURITY: Validate code length to prevent memory exhaustion
             if len(command) > MAX_CODE_LENGTH:
@@ -275,133 +335,419 @@ class ACL2Session:
             validated_timeout = validate_timeout(timeout)
 
             try:
-                # Log input
-                if self.log_handle:
-                    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-                    self.log_handle.write(f"\n[{timestamp}] >>> INPUT >>>\n{command}\n")
-                    self.log_handle.flush()
+                # Log input in natural format (no banner) - write directly to merge queue
+                # This ensures it appears in correct chronological order
+                timestamp_mono = time.monotonic()
+                seq_id = await self._get_next_sequence_id()
+                # Input line (command)
+                await self.merge_queue.put((timestamp_mono, seq_id, "stdin", f"{command}\n"))
+                # Timestamp after input
+                seq_id = await self._get_next_sequence_id()
+                current_time = time.strftime("%Y-%m-%d %H:%M:%S")
+                timestamp_line = f"[{current_time} INPUT]\n"
+                await self.merge_queue.put((timestamp_mono, seq_id, "stdin", timestamp_line))
 
-                # Send command
+                # Send command to ACL2 via PTY master
                 try:
-                    self.process.stdin.write(f"{command}\n".encode())
-                    await self.process.stdin.drain()
-                except (BrokenPipeError, ConnectionResetError):
-                    return "Error: Session connection lost (broken pipe)"
+                    command_bytes = f"{command}\n".encode()
+                    loop = asyncio.get_event_loop()
+                    # Write to PTY master - use run_in_executor to avoid blocking
+                    written = await loop.run_in_executor(
+                        None,
+                        os.write,
+                        self.master_fd,
+                        command_bytes
+                    )
+                    if written < len(command_bytes):
+                        # Partial write - this shouldn't happen with PTY, but handle it
+                        return "Error: Failed to write complete command to session"
+                except OSError as e:
+                    if e.errno in (errno.EIO, errno.EBADF, errno.EPIPE):
+                        return "Error: Session connection lost"
+                    raise
 
-                # Read response with timeout
-                output_lines = []
-                # SECURITY: Use cryptographically random marker to prevent injection
-                marker = f"___MARKER_{uuid.uuid4().hex}_{uuid.uuid4().hex}___"
+                # Wait for prompt to appear in output_buffer (populated by background logger task)
 
-                # Send a marker to know when we're done
-                try:
-                    self.process.stdin.write(f'(cw "~%{marker}~%")\n'.encode())
-                    await self.process.stdin.drain()
-                except (BrokenPipeError, ConnectionResetError):
-                    return "Error: Session connection lost (broken pipe)"
-
-                # SECURITY: Implement true total timeout, not per-line timeout
+                start_buffer_index = len(self.output_buffer)  # Start searching from here
                 start_time = time.time()
-                marker_found = False
+                prompt_found = False
+                output_lines: list[str] = []
 
                 try:
-                    if validated_timeout is None:
-                        # No timeout - loop indefinitely until marker found
-                        while True:
-                            try:
-                                line = await asyncio.wait_for(
-                                    self.process.stdout.readline(),
-                                    timeout=1.0  # Use 1s timeout per line to allow checking for marker
-                                )
-                                if not line:  # EOF
-                                    return "Error: Session process terminated unexpectedly"
-                                decoded_line = line.decode()
-                                output_lines.append(decoded_line)
+                    while True:
+                        # Check if prompt has appeared in buffer
+                        for i in range(start_buffer_index, len(self.output_buffer)):
+                            line = self.output_buffer[i]
+                            output_lines.append(line)
 
-                                if marker in decoded_line:
-                                    marker_found = True
+                            # Check if this line matches any prompt pattern
+                            line_stripped = line.rstrip('\n')
+                            for pattern in PROMPT_PATTERNS:
+                                if pattern.match(line_stripped):
+                                    prompt_found = True
                                     break
-                            except asyncio.TimeoutError:
-                                # Continue reading indefinitely
-                                continue
-                    else:
-                        # With timeout - existing logic
-                        while time.time() - start_time < validated_timeout:
-                            remaining = validated_timeout - (time.time() - start_time)
-                            if remaining <= 0:
+
+                            if prompt_found:
                                 break
 
-                            try:
-                                line = await asyncio.wait_for(
-                                    self.process.stdout.readline(),
-                                    timeout=min(remaining, 1.0)
-                                )
-                                if not line:  # EOF
-                                    return "Error: Session process terminated unexpectedly"
-                                decoded_line = line.decode()
-                                output_lines.append(decoded_line)
+                        if prompt_found:
+                            break
 
-                                if marker in decoded_line:
-                                    marker_found = True
-                                    break
-                            except asyncio.TimeoutError:
-                                # Continue reading until total timeout
-                                continue
+                        # Check timeout
+                        if validated_timeout is not None:
+                            elapsed = time.time() - start_time
+                            if elapsed >= validated_timeout:
+                                return f"Error: Command execution timed out after {validated_timeout} seconds"
 
-                        if not marker_found and (time.time() - start_time) >= validated_timeout:
-                            return f"Error: Command execution timed out after {validated_timeout} seconds"
+                        # Update our position in buffer for next check
+                        start_buffer_index = len(self.output_buffer)
+
+                        # Wait a bit before checking again (avoid busy loop)
+                        await asyncio.sleep(0.1)
+
+                        # Check if session has been shutdown
+                        if self.shutdown_event.is_set():
+                            return "Error: Session terminated during command execution"
 
                 except Exception:
                     return "Error: Session communication failed"
 
                 self.event_counter += 1
-                output = "".join(output_lines).replace(marker, "").strip()
 
-                # Log output
-                if self.log_handle:
-                    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-                    self.log_handle.write(f"\n[{timestamp}] <<< OUTPUT <<<\n{output}\n")
-                    self.log_handle.flush()
-
+                # Return collected output
+                output = "".join(output_lines).strip()
                 return output
 
-            except (BrokenPipeError, ConnectionResetError):
-                # SECURITY: Don't leak internal details in error messages
-                return "Error: Session connection lost (broken pipe)"
+            except OSError as e:
+                if e.errno in (errno.EIO, errno.EBADF, errno.EPIPE):
+                    return "Error: Session connection lost"
+                return "Error: Failed to execute command in session"
             except Exception:
                 # SECURITY: Don't leak internal details in error messages
                 return "Error: Failed to execute command in session"
 
-    async def terminate(self) -> None:
-        """Terminate the ACL2 session."""
+    async def interrupt(self) -> str:
+        """
+        Interrupt a running command in this session by sending Ctrl-C via PTY.
+
+        This mimics a user pressing Ctrl-C in a terminal. The PTY's controlling
+        terminal setup ensures the interrupt is delivered correctly to ACL2/SBCL.
+
+        Returns:
+            Status message indicating success or failure
+        """
         try:
-            if self.process.stdin:
-                try:
-                    self.process.stdin.write(b"(good-bye)\n")
-                    await self.process.stdin.drain()
-                    self.process.stdin.close()
-                except (BrokenPipeError, ConnectionResetError):
-                    # Process already dead, ignore
+            if self.master_fd is None:
+                return "Error: Session PTY master is not available"
+
+            if self.process.returncode is not None:
+                return "Error: Session process has already terminated"
+
+            # Primary method: Send Ctrl-C (0x03) through the PTY
+            # This is how a terminal delivers interrupts - the line discipline
+            # converts it to SIGINT for the foreground process group
+            try:
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(
+                    None,
+                    os.write,
+                    self.master_fd,
+                    b"\x03"  # Ctrl-C
+                )
+
+                # Log the interrupt in the session
+                timestamp = time.monotonic()
+                seq_id = await self._get_next_sequence_id()
+                interrupt_time = time.strftime("%Y-%m-%d %H:%M:%S")
+                marker = f"[{interrupt_time} INTERRUPT SENT]\n"
+                await self.merge_queue.put((timestamp, seq_id, "stdout", marker))
+
+                return "Interrupt signal sent via PTY"
+
+            except OSError as e:
+                if e.errno in (errno.EIO, errno.EBADF, errno.EPIPE):
+                    # PTY write failed, try fallback method
                     pass
-            await asyncio.wait_for(self.process.wait(), timeout=5.0)
-        except asyncio.TimeoutError:
-            self.process.kill()
-            await self.process.wait()
-        except Exception:
-            self.process.kill()
-            await self.process.wait()
+                else:
+                    raise
+
+            # Fallback method: Send SIGINT to the process group
+            # This is needed if the PTY write fails for some reason
+            try:
+                # Get the process group ID and send SIGINT
+                pgid = os.getpgid(self.process.pid)
+                os.killpg(pgid, signal.SIGINT)
+
+                # Log the interrupt
+                timestamp = time.monotonic()
+                seq_id = await self._get_next_sequence_id()
+                interrupt_time = time.strftime("%Y-%m-%d %H:%M:%S")
+                marker = f"[{interrupt_time} INTERRUPT SENT (FALLBACK)]\n"
+                await self.merge_queue.put((timestamp, seq_id, "stdout", marker))
+
+                return "Interrupt signal sent via SIGINT (fallback)"
+
+            except (ProcessLookupError, PermissionError) as e:
+                return f"Error: Failed to interrupt session: {e}"
+
+        except Exception as e:
+            return f"Error: Failed to interrupt session: {e}"
+
+    async def _get_next_sequence_id(self) -> int:
+        """Get the next sequence ID for ordering output lines."""
+        async with self.sequence_lock:
+            seq_id = self.sequence_counter
+            self.sequence_counter += 1
+            return seq_id
+
+    def _on_pty_readable(self) -> None:
+        """
+        Synchronous callback invoked by event loop when PTY master has data.
+        Reads available data, updates ring buffer, processes lines, and schedules
+        async work via ensure_future.
+
+        This is NOT a coroutine - it's a synchronous callback for loop.add_reader.
+        """
+        if self.master_fd is None:
+            return
+
+        try:
+            # Read all available data (master_fd is non-blocking)
+            while True:
+                try:
+                    chunk = os.read(self.master_fd, 4096)
+                    if not chunk:
+                        # EOF - PTY master closed
+                        # Schedule async cleanup
+                        asyncio.ensure_future(self._handle_pty_eof())
+                        return
+
+                    # Add to ring buffer (maintain max size)
+                    self.ring_buffer.extend(chunk)
+                    if len(self.ring_buffer) > self.max_ring_buffer_size:
+                        # Trim from the beginning to maintain size limit
+                        excess = len(self.ring_buffer) - self.max_ring_buffer_size
+                        self.ring_buffer = self.ring_buffer[excess:]
+
+                    # Schedule async processing of the chunk
+                    asyncio.ensure_future(self._process_pty_chunk(chunk))
+
+                except BlockingIOError:
+                    # No more data available right now
+                    break
+                except OSError as e:
+                    if e.errno in (errno.EIO, errno.EBADF):
+                        # EIO: I/O error (master closed), EBADF: bad fd
+                        asyncio.ensure_future(self._handle_pty_eof())
+                        return
+                    raise
+
+        except Exception as e:
+            print(f"Error in PTY reader callback: {e}", file=sys.stderr)
+            asyncio.ensure_future(self._handle_pty_error(e))
+
+    async def _process_pty_chunk(self, chunk: bytes) -> None:
+        """
+        Process a chunk of data from the PTY.
+        Tags lines with timestamps, pushes to merge queue for logging.
+
+        Args:
+            chunk: Raw bytes from PTY (may contain partial lines, carriage returns, etc.)
+        """
+        try:
+            # Process complete lines and detect partial prompts
+            # This logic is similar to before but operates on chunks
+            buffer = chunk
+
+            while buffer:
+                newline_idx = buffer.find(b'\n')
+
+                if newline_idx >= 0:
+                    # Extract complete line (including newline)
+                    line = buffer[:newline_idx + 1]
+                    buffer = buffer[newline_idx + 1:]
+
+                    # Tag and push to queue
+                    timestamp = time.monotonic()
+                    seq_id = await self._get_next_sequence_id()
+                    decoded_line = line.decode(errors='replace')
+                    await self.merge_queue.put((timestamp, seq_id, "stdout", decoded_line))
+                else:
+                    # Remaining buffer has no newline
+                    # Check if it matches a prompt pattern (prompts don't have newlines)
+                    try:
+                        decoded_buffer = buffer.decode(errors='replace')
+                        if matches_prompt_pattern(decoded_buffer):
+                            # This is a prompt - flush it immediately
+                            timestamp = time.monotonic()
+                            seq_id = await self._get_next_sequence_id()
+                            await self.merge_queue.put((timestamp, seq_id, "stdout", decoded_buffer))
+                            buffer = b""
+                        else:
+                            # Not a prompt, might be partial line - don't queue yet
+                            # It will be completed when more data arrives
+                            break
+                    except UnicodeDecodeError:
+                        # Buffer contains partial UTF-8 sequence
+                        break
+
+        except Exception as e:
+            print(f"Error processing PTY chunk: {e}", file=sys.stderr)
+
+    async def _handle_pty_eof(self) -> None:
+        """Handle EOF from PTY master (session ended)."""
+        try:
+            timestamp = time.monotonic()
+            seq_id = await self._get_next_sequence_id()
+            end_time = time.strftime("%Y-%m-%d %H:%M:%S")
+            end_marker = f"[{end_time} SESSION ENDED]\n"
+            await self.merge_queue.put((timestamp, seq_id, "stdout", end_marker))
+        except Exception as e:
+            print(f"Error handling PTY EOF: {e}", file=sys.stderr)
         finally:
-            # Close log file if open
-            if self.log_handle:
+            self.shutdown_event.set()
+
+    async def _handle_pty_error(self, error: Exception) -> None:
+        """Handle errors from PTY reader."""
+        print(f"PTY error: {error}", file=sys.stderr)
+        self.shutdown_event.set()
+
+    async def _logger_task(self) -> None:
+        """
+        Background task that reads from merge queue and writes to log file.
+        Maintains timestamp ordering and updates output_buffer for send_command.
+        """
+        try:
+            if not self.log_file:
+                return
+
+            # Open log file with aiofiles for non-blocking async I/O
+            async with aiofiles.open(self.log_file, "a", buffering=1) as log_handle:
+                while not self.shutdown_event.is_set():
+                    try:
+                        # Get next line from merge queue with timeout
+                        timestamp, seq_id, stream_type, line = await asyncio.wait_for(
+                            self.merge_queue.get(),
+                            timeout=1.0  # Check shutdown event periodically
+                        )
+
+                        # Write to log file
+                        await log_handle.write(line)
+                        await log_handle.flush()
+
+                        # Also store in output_buffer for send_command to search for prompts
+                        self.output_buffer.append(line)
+
+                        # Check if buffer is getting too large (keep last 50000 lines)
+                        if len(self.output_buffer) > 50000:
+                            self.output_buffer = self.output_buffer[-50000:]
+                            print(f"Warning: Output buffer trimmed for session {self.session_id}", file=sys.stderr)
+
+                    except asyncio.TimeoutError:
+                        # No data in queue, continue checking shutdown
+                        continue
+                    except Exception as e:
+                        print(f"Error in logger task: {e}", file=sys.stderr)
+                        break
+
+                # Drain remaining items in queue before shutting down
+                while not self.merge_queue.empty():
+                    try:
+                        timestamp, seq_id, stream_type, line = self.merge_queue.get_nowait()
+                        await log_handle.write(line)
+                        await log_handle.flush()
+                        self.output_buffer.append(line)
+                    except asyncio.QueueEmpty:
+                        break
+                    except Exception as e:
+                        print(f"Error draining queue: {e}", file=sys.stderr)
+                        break
+
+        except Exception as e:
+            print(f"Fatal error in logger task: {e}", file=sys.stderr)
+
+    async def terminate(self) -> None:
+        """
+        Terminate the ACL2 session and stop all background tasks.
+        Ensures all output is logged before shutdown.
+        """
+        try:
+            # Remove the event loop reader first
+            if self.reader_handle is not None:
+                loop = asyncio.get_event_loop()
+                loop.remove_reader(self.master_fd)
+                self.reader_handle = None
+
+            # Send good-bye command to ACL2 via PTY
+            if self.master_fd is not None:
                 try:
-                    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-                    self.log_handle.write(f"\n{'='*60}\n")
-                    self.log_handle.write(f"Session ended: {timestamp}\n")
-                    self.log_handle.write(f"{'='*60}\n")
-                    self.log_handle.close()
-                except Exception:
-                    # Ignore errors closing log file
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(
+                        None,
+                        os.write,
+                        self.master_fd,
+                        b"(good-bye)\n"
+                    )
+                    # Give ACL2 a moment to process goodbye
+                    await asyncio.sleep(0.5)
+                except OSError:
+                    # PTY already closed or other error, ignore
                     pass
+
+            # Wait for process to terminate
+            try:
+                await asyncio.wait_for(self.process.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                self.process.kill()
+                await self.process.wait()
+            except Exception:
+                self.process.kill()
+                await self.process.wait()
+
+        finally:
+            # Signal background tasks to shut down
+            self.shutdown_event.set()
+
+            # Remove reader if not already removed
+            if self.reader_handle is not None:
+                try:
+                    loop = asyncio.get_event_loop()
+                    loop.remove_reader(self.master_fd)
+                    self.reader_handle = None
+                except Exception:
+                    pass
+
+            # Close PTY master file descriptor
+            if self.master_fd is not None:
+                try:
+                    os.close(self.master_fd)
+                    self.master_fd = None
+                except OSError:
+                    # Already closed, ignore
+                    pass
+
+            # Clear ring buffer
+            if hasattr(self, 'ring_buffer'):
+                self.ring_buffer.clear()
+
+            # Wait for background tasks to complete (with timeout)
+            tasks_to_cancel = []
+            if self.logger_task:
+                tasks_to_cancel.append(self.logger_task)
+
+            if tasks_to_cancel:
+                try:
+                    # Wait for tasks to finish gracefully (they check shutdown_event)
+                    await asyncio.wait_for(
+                        asyncio.gather(*tasks_to_cancel, return_exceptions=True),
+                        timeout=3.0
+                    )
+                except asyncio.TimeoutError:
+                    # Force cancel if they don't finish in time
+                    for task in tasks_to_cancel:
+                        task.cancel()
+                    # Wait for cancellation to complete
+                    await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
 
 
 def open_log_viewer(log_file: Path, lines: int = 50) -> None:
@@ -462,7 +808,7 @@ class SessionManager:
         self,
         name: Optional[str] = None,
         enable_logging: bool = True,
-        enable_log_viewer: bool = False,
+        enable_log_viewer: bool = True,
         log_tail_lines: int = 50,
         cwd: Optional[str] = None
     ) -> tuple[str, str]:
@@ -472,7 +818,7 @@ class SessionManager:
         Args:
             name: Optional human-readable name for the session
             enable_logging: If True, log all I/O to a session file (default: True)
-            enable_log_viewer: If True, open a terminal window showing the log (default: False)
+            enable_log_viewer: If True, open a terminal window showing the log (default: True)
             log_tail_lines: Number of lines to show in log viewer (default: 50)
             cwd: Optional working directory for the ACL2 process (default: None, uses current directory)
 
@@ -492,44 +838,68 @@ class SessionManager:
         session_id = str(uuid.uuid4())
 
         try:
-            # Use wrapper script that handles TTY disconnect gracefully
-            # This prevents nested error backtraces when stdin closes unexpectedly
-            wrapper_script = Path(__file__).parent / "acl2-wrapper.sh"
-            process = await asyncio.create_subprocess_exec(
-                str(wrapper_script),
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
-            )
+            # Create pseudo-terminal (pty) for ACL2 process
+            # This makes SBCL think it's running interactively, ensuring unbuffered output
+            master_fd, slave_fd = pty.openpty()
 
-            session = ACL2Session(
-                session_id=session_id,
-                name=name,
-                process=process,
-                created_at=time.time(),
-                last_activity=time.time(),
-            )
+            # Set terminal size (80 columns x 24 rows) to avoid issues with programs
+            # that query terminal dimensions
+            winsize = struct.pack("HHHH", 24, 80, 0, 0)
+            fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, winsize)
 
-            # Wait for ACL2 to start up and print its banner
-            # Read until we see the first prompt "ACL2 !>"
-            startup_output = []
+            # Make master_fd non-blocking for event-driven async I/O
+            flags = fcntl.fcntl(master_fd, fcntl.F_GETFL)
+            fcntl.fcntl(master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+
+            # Configure terminal attributes for raw mode (no line editing, no echo processing)
+            # This prevents the PTY from interpreting control characters and provides
+            # clean echoed input like Emacs shell-mode
             try:
-                while True:
-                    line = await asyncio.wait_for(
-                        process.stdout.readline(),
-                        timeout=10.0  # 10 second timeout for startup
-                    )
-                    if not line:
-                        break
-                    decoded = line.decode()
-                    startup_output.append(decoded)
-                    if "ACL2 !>" in decoded:
-                        break
-            except asyncio.TimeoutError:
-                pass  # Continue even if we timeout
+                attrs = termios.tcgetattr(slave_fd)
+                # Use raw mode but keep some minimal processing
+                # ECHO is handled by ACL2/SBCL, so we disable it at PTY level
+                attrs[3] = attrs[3] & ~termios.ECHO  # Disable echo (ACL2 handles its own)
+                termios.tcsetattr(slave_fd, termios.TCSANOW, attrs)
+            except termios.error:
+                # If termios setup fails, continue anyway - not critical
+                pass
 
-            # Set up logging if enabled
+            # Define preexec_fn to set up controlling terminal properly
+            def setup_controlling_tty():
+                """
+                Make the child process a session leader with the PTY slave as controlling terminal.
+                This is critical for proper signal handling (Ctrl-C) and terminal behavior.
+
+                Required on macOS for TIOCSCTTY to work.
+                """
+                os.setsid()  # Create new session, become session leader
+                # Set the slave PTY as the controlling terminal for this session
+                # This is what makes Ctrl-C and other terminal signals work correctly
+                fcntl.ioctl(slave_fd, termios.TIOCSCTTY, 0)
+
+            # Set up environment for ACL2 process
+            env = os.environ.copy()
+            env["TERM"] = "dumb"  # Like Emacs comint - simple terminal without fancy features
+            env["COLUMNS"] = "80"
+            env["LINES"] = "24"
+
+            # Spawn ACL2 process with slave as stdin/stdout/stderr
+            # Note: We call 'acl2' directly, no wrapper script needed
+            process = await asyncio.create_subprocess_exec(
+                "acl2",
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                cwd=cwd,
+                env=env,
+                preexec_fn=setup_controlling_tty,  # Critical for proper terminal setup
+            )
+
+            # Close slave_fd in parent process (child inherited it)
+            os.close(slave_fd)
+
+            # Set up logging first if enabled
+            log_file = None
             if enable_logging:
                 # Create log directory
                 log_dir = Path.home() / ".acl2-mcp" / "sessions"
@@ -540,32 +910,51 @@ class SessionManager:
                 log_filename = f"{session_id}-{timestamp}.log"
                 log_file = log_dir / log_filename
 
-                # Open log file with line buffering
-                log_handle = open(log_file, "a", buffering=1)
+            session = ACL2Session(
+                session_id=session_id,
+                name=name,
+                process=process,
+                created_at=time.time(),
+                last_activity=time.time(),
+                log_file=log_file,
+                master_fd=master_fd,
+                ring_buffer=bytearray(),
+            )
 
-                # Write header
+            # Start background I/O tasks immediately
+            # Use event-driven reader for PTY master
+            loop = asyncio.get_event_loop()
+            session.reader_handle = loop.add_reader(
+                master_fd,
+                session._on_pty_readable
+            )
+            session.logger_task = asyncio.create_task(session._logger_task())
+
+            # Write session start marker to log
+            if log_file:
                 header_time = time.strftime("%Y-%m-%d %H:%M:%S")
-                log_handle.write(f"{'='*60}\n")
-                log_handle.write(f"ACL2 Session Log\n")
-                log_handle.write(f"Session started: {header_time}\n")
-                log_handle.write(f"Session ID: {session_id}\n")
-                if name:
-                    log_handle.write(f"Session name: {name}\n")
-                log_handle.write(f"{'='*60}\n\n")
+                start_marker = f"[{header_time} SESSION STARTED]\n"
+                timestamp_mono = time.monotonic()
+                seq_id = await session._get_next_sequence_id()
+                await session.merge_queue.put((timestamp_mono, seq_id, "session", start_marker))
 
-                # Write startup banner
-                if startup_output:
-                    log_handle.write(f"[{header_time}] ACL2 Startup:\n")
-                    log_handle.writelines(startup_output)
-                    log_handle.write("\n")
-                log_handle.flush()
+            # Wait for ACL2 startup by checking for prompt in output_buffer
+            # (populated by background tasks)
+            start_time = time.time()
+            startup_complete = False
+            while time.time() - start_time < 10.0:  # 10 second timeout
+                # Check if we've seen the ACL2 prompt
+                for line in session.output_buffer:
+                    if "ACL2 !>" in line:
+                        startup_complete = True
+                        break
+                if startup_complete:
+                    break
+                await asyncio.sleep(0.1)  # Check every 100ms
 
-                session.log_file = log_file
-                session.log_handle = log_handle
-
-                # Open log viewer if requested
-                if enable_log_viewer:
-                    open_log_viewer(log_file, log_tail_lines)
+            # Open log viewer if requested
+            if enable_log_viewer and log_file:
+                open_log_viewer(log_file, log_tail_lines)
 
             self.sessions[session_id] = session
 
@@ -600,6 +989,22 @@ class SessionManager:
         del self.sessions[session_id]
 
         return f"Session {session_id} ended successfully"
+
+    async def interrupt_session(self, session_id: str) -> str:
+        """
+        Send SIGINT to interrupt a running ACL2 command in the session.
+
+        Args:
+            session_id: The session ID to interrupt
+
+        Returns:
+            Status message
+        """
+        session = self.sessions.get(session_id)
+        if not session:
+            return f"Error: Session {session_id} not found"
+
+        return await session.interrupt()
 
     def list_sessions(self) -> str:
         """
@@ -707,8 +1112,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "enable_log_viewer": {
                         "type": "boolean",
-                        "description": "If true, open a terminal window showing the session log (default: true)",
-                        "default": True,
+                        "description": "If true, open a terminal window showing the session log (default: false)",
+                        "default": False,
                     },
                     "log_tail_lines": {
                         "type": "number",
@@ -742,6 +1147,20 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {},
+            },
+        ),
+        Tool(
+            name="interrupt_session",
+            description="Send SIGINT (Ctrl-C) to interrupt a running ACL2 command in a session. Use this when ACL2 gets stuck in an infinite loop or a proof attempt is taking too long. This is equivalent to pressing Ctrl-C in an interactive ACL2 session.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "ID of the session to interrupt",
+                    },
+                },
+                "required": ["session_id"],
             },
         ),
         Tool(
@@ -1371,6 +1790,16 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
 
     elif name == "list_sessions":
         message = session_manager.list_sessions()
+        return [
+            TextContent(
+                type="text",
+                text=message,
+            )
+        ]
+
+    elif name == "interrupt_session":
+        session_id = arguments["session_id"]
+        message = await session_manager.interrupt_session(session_id)
         return [
             TextContent(
                 type="text",
