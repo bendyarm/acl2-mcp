@@ -17,7 +17,7 @@ import termios
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Sequence, Optional, IO
+from typing import Any, Sequence, Optional, IO, Callable, Awaitable
 from dataclasses import dataclass, field
 
 from mcp.server import Server
@@ -290,9 +290,9 @@ class ACL2Session:
 
     # PTY infrastructure
     master_fd: Optional[int] = None
-    reader_handle: Optional[asyncio.Handle] = None
     ring_buffer: bytearray = field(default_factory=bytearray)
     max_ring_buffer_size: int = 65536  # 64KB rolling buffer
+    partial_line_buffer: bytearray = field(default_factory=bytearray)  # Accumulates incomplete lines across chunks
 
     # Background I/O infrastructure
     merge_queue: asyncio.Queue[tuple[float, int, str, str]] = field(default_factory=lambda: asyncio.Queue(maxsize=10000))  # (timestamp, seq_id, stream_type, line)
@@ -301,7 +301,7 @@ class ACL2Session:
     sequence_lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # Protects sequence_counter
 
     # Background task references
-    # Note: stdout_reader_task is replaced by reader_handle (event-driven callback)
+    # Note: PTY reader uses loop.add_reader() callback (event-driven, no handle stored)
     logger_task: Optional[asyncio.Task[None]] = None
 
     # Shutdown coordination
@@ -511,6 +511,10 @@ class ACL2Session:
         if self.master_fd is None:
             return
 
+        # Don't process new data if shutdown is in progress
+        if self.shutdown_event.is_set():
+            return
+
         try:
             # Read all available data (master_fd is non-blocking)
             while True:
@@ -555,9 +559,12 @@ class ACL2Session:
             chunk: Raw bytes from PTY (may contain partial lines, carriage returns, etc.)
         """
         try:
-            # Process complete lines and detect partial prompts
-            # This logic is similar to before but operates on chunks
-            buffer = chunk
+            # Prepend any partial line from previous chunk
+            if self.partial_line_buffer:
+                buffer = self.partial_line_buffer + chunk
+                self.partial_line_buffer.clear()
+            else:
+                buffer = chunk
 
             while buffer:
                 newline_idx = buffer.find(b'\n')
@@ -566,6 +573,10 @@ class ACL2Session:
                     # Extract complete line (including newline)
                     line = buffer[:newline_idx + 1]
                     buffer = buffer[newline_idx + 1:]
+
+                    # Strip CR if present (convert CRLF to LF)
+                    if line.endswith(b'\r\n'):
+                        line = line[:-2] + b'\n'
 
                     # Tag and push to queue
                     timestamp = time.monotonic()
@@ -584,11 +595,12 @@ class ACL2Session:
                             await self.merge_queue.put((timestamp, seq_id, "stdout", decoded_buffer))
                             buffer = b""
                         else:
-                            # Not a prompt, might be partial line - don't queue yet
-                            # It will be completed when more data arrives
+                            # Not a prompt, might be partial line - save for next chunk
+                            self.partial_line_buffer.extend(buffer)
                             break
                     except UnicodeDecodeError:
-                        # Buffer contains partial UTF-8 sequence
+                        # Buffer contains partial UTF-8 sequence - save for next chunk
+                        self.partial_line_buffer.extend(buffer)
                         break
 
         except Exception as e:
@@ -596,6 +608,10 @@ class ACL2Session:
 
     async def _handle_pty_eof(self) -> None:
         """Handle EOF from PTY master (session ended)."""
+        # Make idempotent: if shutdown already initiated, don't log again
+        if self.shutdown_event.is_set():
+            return
+
         try:
             timestamp = time.monotonic()
             seq_id = await self._get_next_sequence_id()
@@ -673,10 +689,24 @@ class ACL2Session:
         """
         try:
             # Remove the event loop reader first
-            if self.reader_handle is not None:
-                loop = asyncio.get_event_loop()
-                loop.remove_reader(self.master_fd)
-                self.reader_handle = None
+            if self.master_fd is not None:
+                try:
+                    loop = asyncio.get_event_loop()
+                    loop.remove_reader(self.master_fd)
+                except (ValueError, OSError):
+                    # Reader wasn't registered or fd invalid
+                    pass
+
+            # Write session end marker to log
+            try:
+                timestamp_mono = time.monotonic()
+                seq_id = await self._get_next_sequence_id()
+                end_time = time.strftime("%Y-%m-%d %H:%M:%S")
+                end_marker = f"\n[{end_time} SESSION ENDED]\n"
+                await self.merge_queue.put((timestamp_mono, seq_id, "session", end_marker))
+            except Exception:
+                # If logging fails, continue with termination
+                pass
 
             # Send good-bye command to ACL2 via PTY
             if self.master_fd is not None:
@@ -709,12 +739,12 @@ class ACL2Session:
             self.shutdown_event.set()
 
             # Remove reader if not already removed
-            if self.reader_handle is not None:
+            if self.master_fd is not None:
                 try:
                     loop = asyncio.get_event_loop()
                     loop.remove_reader(self.master_fd)
-                    self.reader_handle = None
                 except Exception:
+                    # Reader wasn't registered or fd invalid
                     pass
 
             # Close PTY master file descriptor
@@ -924,10 +954,7 @@ class SessionManager:
             # Start background I/O tasks immediately
             # Use event-driven reader for PTY master
             loop = asyncio.get_event_loop()
-            session.reader_handle = loop.add_reader(
-                master_fd,
-                session._on_pty_readable
-            )
+            loop.add_reader(master_fd, session._on_pty_readable)
             session.logger_task = asyncio.create_task(session._logger_task())
 
             # Write session start marker to log
@@ -1546,7 +1573,12 @@ async def run_acl2_file(file_path: str, timeout: int | None = None) -> str:
     return await run_acl2(code, timeout)
 
 
-async def certify_acl2_book(file_path: str, timeout: int | None = None, jobs: int = 12) -> str:
+async def certify_acl2_book(
+    file_path: str,
+    timeout: int | None = None,
+    jobs: int = 12,
+    progress_callback: Optional[Callable[[str], Awaitable[None]]] = None
+) -> str:
     """
     Certify an ACL2 book using cert.pl.
 
@@ -1554,6 +1586,7 @@ async def certify_acl2_book(file_path: str, timeout: int | None = None, jobs: in
         file_path: Path to the book (can be relative or absolute, without .lisp extension)
         timeout: Timeout in seconds (None = no timeout)
         jobs: Number of parallel jobs for cert.pl (default: 12)
+        progress_callback: Optional async callback to report progress messages
 
     Returns:
         Success/failure message with error details if failed
@@ -1563,6 +1596,13 @@ async def certify_acl2_book(file_path: str, timeout: int | None = None, jobs: in
 
     # Build cert.pl command with -j flag
     cmd_args = ["cert.pl", f"-j{jobs}", book_path]
+
+    # Format command for display
+    cmd_display = " ".join(cmd_args)
+
+    # Send progress notification with command if callback provided
+    if progress_callback:
+        await progress_callback(f"Running: {cmd_display}")
 
     # Use cert.pl to certify the book
     try:
@@ -2082,6 +2122,49 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
         file_path = arguments["file_path"]
         timeout = arguments.get("timeout")
 
+        # Progress notification support for displaying command line before execution
+        #
+        # The MCP protocol supports optional progress notifications where the client
+        # sends a progressToken in the request metadata, and the server can send
+        # asynchronous progress updates via notifications/progress messages.
+        #
+        # CURRENT STATUS (2025-11-06): Claude Code does not appear to send progress
+        # tokens to MCP servers. However, this code is structured to support progress
+        # notifications for when that capability is added.
+        #
+        # HOW IT WORKS:
+        # - If progressToken is present: Send command line as async progress notification
+        #   (appears in Claude Code immediately, before cert.pl completes)
+        # - If no progressToken: Capture command line and include in final return message
+        #   (appears after cert.pl completes)
+        #
+        # BENEFIT: With progress notifications, users see the exact cert.pl command
+        # being executed immediately, providing better visibility into long-running
+        # operations.
+        context = app.request_context
+        progress_token = context.meta.progressToken if context.meta else None
+
+        # Track command for display
+        command_info: list[str] = []
+
+        # Create progress callback if token is available
+        progress_callback = None
+        if progress_token:
+            # Progress token available - send async notification
+            async def send_progress(message: str) -> None:
+                await context.session.send_progress_notification(
+                    progress_token=progress_token,
+                    progress=0,
+                    total=1,
+                    message=message
+                )
+            progress_callback = send_progress
+        else:
+            # No progress token - capture command for inclusion in return message
+            async def capture_command(message: str) -> None:
+                command_info.append(message)
+            progress_callback = capture_command
+
         # Determine number of jobs
         if "jobs" in arguments:
             # User explicitly specified jobs
@@ -2092,11 +2175,16 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             if optimal_jobs is not None:
                 jobs = optimal_jobs
                 # Prepend info to output
-                output = await certify_acl2_book(file_path, timeout, jobs)
+                output = await certify_acl2_book(file_path, timeout, jobs, progress_callback)
+                # Include command info if captured
+                result_text = f"Auto-detected jobs: {jobs} ({info})\n\n"
+                if command_info:
+                    result_text += f"{command_info[0]}\n\n"
+                result_text += output
                 return [
                     TextContent(
                         type="text",
-                        text=f"Auto-detected jobs: {jobs} ({info})\n\n{output}",
+                        text=result_text,
                     )
                 ]
             else:
@@ -2108,12 +2196,18 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
                     )
                 ]
 
-        output = await certify_acl2_book(file_path, timeout, jobs)
+        output = await certify_acl2_book(file_path, timeout, jobs, progress_callback)
+
+        # Include command info if captured
+        result_text = ""
+        if command_info:
+            result_text = f"{command_info[0]}\n\n"
+        result_text += output
 
         return [
             TextContent(
                 type="text",
-                text=output,
+                text=result_text,
             )
         ]
 
