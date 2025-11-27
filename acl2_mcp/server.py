@@ -1878,14 +1878,16 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
                 )
             ]
 
-        # Use ACL2's :ubt to undo
-        # SECURITY: Ensure undo_count is within valid range
-        undo_count = max(0, min(session.event_counter - count, session.event_counter))
-        if undo_count < 0:
-            undo_count = 0
+        # Use ACL2's undo commands with relative addressing
+        # :u undoes the most recent command
+        # :ubt (:x -k) undoes through k commands before the most recent
+        if count == 1:
+            output = await session.send_command(":u")
+        else:
+            output = await session.send_command(f":ubt (:x -{count - 1})")
 
-        output = await session.send_command(f":ubt {undo_count}")
-        session.event_counter = undo_count
+        # Update event counter (approximate, may drift from actual ACL2 state)
+        session.event_counter = max(0, session.event_counter - count)
 
         return [
             TextContent(
