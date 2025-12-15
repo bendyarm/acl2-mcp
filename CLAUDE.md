@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is an MCP (Model Context Protocol) server that provides tools for interacting with the ACL2 theorem prover. The server enables AI assistants to work with ACL2 through 15 different tools, supporting both one-off execution and persistent sessions for incremental development.
+This is an MCP (Model Context Protocol) server that provides tools for interacting with the ACL2 theorem prover. The server enables AI assistants to work with ACL2 through persistent sessions for incremental development (preferred), or one-off execution for special cases.
 
 ## Architecture
 
@@ -18,26 +18,29 @@ This is an MCP (Model Context Protocol) server that provides tools for interacti
 
 ### Execution Modes
 
-1. **One-off execution** (default): Each tool call creates a fresh ACL2 process
+1. **Persistent sessions** (preferred): Long-running ACL2 processes for incremental work
+   - Managed by `SessionManager` (singleton: `session_manager`)
+   - Uses PTY for bidirectional communication (see `docs/architecture.md` for architecture)
+   - Sessions maintain ACL2 world state across commands
+   - Auto-cleanup after 30 minutes inactivity
+   - Max 50 concurrent sessions
+
+2. **One-off execution**: Each tool call creates a fresh ACL2 process
+   - Rarely used; mainly for testing ACL2 startup file handling
    - Code written to temp `.lisp` file
    - ACL2 process started with code as input
    - Output captured and returned
    - Resources cleaned up
 
-2. **Persistent sessions**: Long-running ACL2 processes for incremental work
-   - Managed by `SessionManager` (singleton: `session_manager`)
-   - Each session has stdin/stdout pipes for bidirectional communication
-   - Sessions maintain ACL2 world state across commands
-   - Auto-cleanup after 30 minutes inactivity
-   - Max 50 concurrent sessions
-
 ### Session Communication
 
-Sessions use a marker-based protocol to detect command completion:
-- Commands sent via stdin
-- Cryptographically random marker sent after each command: `___MARKER_{uuid}_{uuid}___`
-- Reads stdout until marker appears or timeout
-- True total timeout (not per-line) prevents DoS
+Sessions use prompt detection to identify command completion:
+- Commands sent via PTY master (chunked writes for large inputs)
+- Background reader continuously captures output to a buffer
+- `send_command()` waits for prompt patterns to appear in output
+- Prompt patterns match ACL2 (`.*>[ ]*$`), SBCL debugger (`.*\] $`), and raw Lisp (`.*\* $`)
+- Based on Emacs `emacs-acl2.el` prompt detection
+- See `docs/architecture.md` for full details
 
 ### Security Features
 
@@ -106,7 +109,7 @@ When adding/modifying tools:
 2. Add handler in `call_tool()`:
    - Extract and validate all arguments
    - Use appropriate validation functions
-   - Use session if `session_id` provided, otherwise one-off execution
+   - Use session if `session_id` provided (preferred), otherwise one-off execution
    - Return `Sequence[TextContent]` (usually single-element list)
 
 3. For session commands:

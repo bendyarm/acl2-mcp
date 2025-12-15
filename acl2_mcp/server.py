@@ -350,19 +350,35 @@ class ACL2Session:
                 await self.merge_queue.put((timestamp_mono, seq_id, "stdin", timestamp_line))
 
                 # Send command to ACL2 via PTY master
+                # Use chunked writes to avoid PTY buffer saturation. On macOS,
+                # PIPE_BUF is only 512 bytes, and writing large inputs in one
+                # os.write() call can cause partial writes or deadlocks when
+                # the PTY output buffer fills with echoed input. By writing in
+                # small chunks and yielding to the event loop between chunks,
+                # we allow the PTY reader to drain ACL2's output and prevent
+                # buffer backpressure.
                 try:
                     command_bytes = f"{command}\n".encode()
                     loop = asyncio.get_event_loop()
-                    # Write to PTY master - use run_in_executor to avoid blocking
-                    written = await loop.run_in_executor(
-                        None,
-                        os.write,
-                        self.master_fd,
-                        command_bytes
-                    )
-                    if written < len(command_bytes):
-                        # Partial write - this shouldn't happen with PTY, but handle it
-                        return "Error: Failed to write complete command to session"
+                    chunk_size = 512  # macOS PIPE_BUF size
+                    total_written = 0
+
+                    for i in range(0, len(command_bytes), chunk_size):
+                        chunk = command_bytes[i:i + chunk_size]
+                        written = await loop.run_in_executor(
+                            None,
+                            os.write,
+                            self.master_fd,
+                            chunk
+                        )
+                        if written < len(chunk):
+                            return "Error: Failed to write complete command to session"
+                        total_written += written
+                        # Yield to event loop to allow PTY output to be drained
+                        # This prevents buffer saturation when ACL2 echoes input
+                        # A small delay is needed to give the reader time to process
+                        await asyncio.sleep(0.001)
+
                 except OSError as e:
                     if e.errno in (errno.EIO, errno.EBADF, errno.EPIPE):
                         return "Error: Session connection lost"

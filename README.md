@@ -217,7 +217,7 @@ Arguments:
 - ✅ Save/restore checkpoints for experimentation
 - ⚡ Sessions auto-timeout after 30 minutes of inactivity
 
-#### Code-based Tools (One-off Execution)
+#### Code-based Tools
 
 **Prove a Theorem:**
 ```lisp
@@ -333,20 +333,20 @@ pytest
 
 The server supports two execution modes:
 
-### One-off Execution (Default)
-When no `session_id` is provided, each tool call:
-1. Writes ACL2 code to a temporary `.lisp` file
-2. Starts a fresh ACL2 process with the code as input
-3. Captures and returns stdout/stderr
-4. Cleans up the temporary file and terminates ACL2
-
-### Persistent Sessions (Incremental Development)
+### Persistent Sessions (Preferred)
 When using sessions:
-1. `start_session` creates a long-running ACL2 process with persistent stdin/stdout pipes
+1. `start_session` creates a long-running ACL2 process using a PTY
 2. Each tool call sends commands to the existing process and reads responses
 3. The ACL2 world state accumulates across multiple commands
 4. Sessions auto-cleanup after 30 minutes of inactivity or when explicitly ended
 5. Up to 50 concurrent sessions are supported
+
+### One-off Execution
+Rarely used; mainly for testing ACL2 startup file handling. When no `session_id` is provided:
+1. Writes ACL2 code to a temporary `.lisp` file
+2. Starts a fresh ACL2 process with the code as input
+3. Captures and returns stdout/stderr
+4. Cleans up the temporary file and terminates ACL2
 
 Default timeout is 30 seconds per command, configurable per request.
 

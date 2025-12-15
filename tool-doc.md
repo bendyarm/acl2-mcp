@@ -275,19 +275,19 @@ Retry the last proof attempt in a session with different hints or strategies. Th
 
 ### Execution Modes
 
-**One-off Execution** (no session_id):
-- Creates fresh ACL2 process for each command
-- Executes code in clean environment
-- Returns output
-- Terminates ACL2 process after completion
-- Use for isolated proofs or evaluations
-
-**Session Execution** (with session_id):
-- Uses existing ACL2 process
+**Session Execution** (with session_id) - Preferred:
+- Uses existing ACL2 process via PTY
 - Maintains state across commands
 - Much faster for repeated operations (no startup cost)
 - Enables incremental development workflow
 - Use for building up definitions and theorems incrementally
+
+**One-off Execution** (no session_id):
+- Rarely used; mainly for testing ACL2 startup file handling
+- Creates fresh ACL2 process for each command
+- Executes code in clean environment
+- Returns output
+- Terminates ACL2 process after completion
 
 ### Background I/O and Logging
 
