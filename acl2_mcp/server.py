@@ -338,6 +338,12 @@ class ACL2Session:
             validated_timeout = validate_timeout(timeout)
 
             try:
+                # Record buffer position BEFORE adding anything to queues or writing to PTY.
+                # This is critical: during the await calls below, _logger_task can run and
+                # append items to output_buffer. If we record start_buffer_index after those
+                # awaits, we might miss the response entirely (race condition causing timeouts).
+                start_buffer_index = len(self.output_buffer)
+
                 # Log input followed by an INPUT timestamp marker for easier auditing
                 timestamp_mono = time.monotonic()
                 seq_id = await self._get_next_sequence_id()
@@ -385,8 +391,7 @@ class ACL2Session:
                     raise
 
                 # Wait for prompt to appear in output_buffer (populated by background logger task)
-
-                start_buffer_index = len(self.output_buffer)  # Start searching from here
+                # Note: start_buffer_index was set at the beginning of this try block
                 start_time = time.time()
                 prompt_found = False
                 output_lines: list[str] = []
