@@ -44,6 +44,7 @@ All code-based tools support an optional `session_id` parameter for incremental 
 - ACL2 installed and available in PATH as `acl2`
   - If installed via package manager (e.g., `brew install acl2`): already configured
   - If built from source: add `/path/to/acl2/bin` to your PATH (this directory contains the `acl2` wrapper script)
+  - If you are using your own script named `acl`, make sure it has a shebang as the first line: `#!/bin/bash`
 - ACL2 books build tools (cert.pl) available in PATH
   - Add `/path/to/acl2/books/build` to your PATH for book certification support
 
