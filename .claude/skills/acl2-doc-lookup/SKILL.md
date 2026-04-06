@@ -4,6 +4,8 @@ description: Look up ACL2 documentation (aka xdoc) for symbols, functions, macro
 allowed-tools: WebFetch
 ---
 
+<!-- Keep in sync with the acl2-doc-lookup section of AGENTS.md --> 
+
 # ACL2 Documentation Lookup Skill
 
 Use this skill to look up ACL2 documentation for symbols, functions, macros, and concepts.
