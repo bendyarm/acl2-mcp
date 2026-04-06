@@ -16,7 +16,7 @@
   and if you do that but want to see a session later, there is a new acl2-mcp
   tool `show_session_log` to see it.
 
-- ACL2 session viewer Terminal automatically closes when the ACL2 session exits.
+- ACL2 session viewer window automatically closes when the ACL2 session exits.
 
 ## Configuration System
 
@@ -144,10 +144,3 @@ result size limit on large LD transcripts.
 ## Documentation
 
 - Added configuration section to README.
-- Added `docs/config-settings-plan.md` — design document for the
-  configuration system.
-- Added `docs/prompt-detection-problem.md` — analysis of the prompt
-  detection problem, catalog of all ACL2 prompt formats, and
-  documentation of the solutions implemented.
-- Added `docs/cpu-idle-prompt-confirmation-plan.md` — a CPU-idle
-  approach that was tried and abandoned (preserved for reference).
