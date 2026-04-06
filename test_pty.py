@@ -24,7 +24,7 @@ async def main():
     session_id, message = await manager.start_session(
         name="test-session",
         enable_logging=True,
-        enable_log_viewer=False
+        view_log_in_terminal=False
     )
 
     if not session_id:

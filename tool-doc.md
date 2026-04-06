@@ -42,7 +42,8 @@ Start a new persistent ACL2 session. This creates a long-running ACL2 process th
 
 - `name` (optional): Optional human-readable name for the session. Example: 'natural-numbers-proof'
 - `enable_logging` (optional): If true, log all I/O to a session file in ~/.acl2-mcp/sessions/ (default: true)
-- `enable_log_viewer` (optional): If true, open a terminal window showing the session log (default: false)
+- `view_log_in_terminal` (optional): If true, open a terminal window showing the session log. If not specified, uses the config default (built-in default: true).
+- `bring_to_front` (optional): If true, bring the session log Terminal window to the foreground. If not specified, uses the config default (built-in default: true).
 - `log_tail_lines` (optional): Number of lines to show in log viewer (default: 50)
 - `cwd` (optional): Optional working directory for the ACL2 process. If not specified, uses the current directory. Example: '/Users/user/acl2/books/kestrel/axe/x86/examples/switch'
 

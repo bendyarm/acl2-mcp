@@ -1,4 +1,24 @@
-"""Tests for ACL2 MCP server session functionality."""
+"""Tests for ACL2 MCP server session functionality.
+
+Known failures as of 2026-04-05:
+- test_eof_detection: Flaky — killing the ACL2 process doesn't always
+  prevent it from responding to the next command, due to process
+  termination timing.
+
+Pre-existing failures in other test files (not in this file):
+- test_security.py::test_validate_timeout_handles_invalid_type
+- test_server.py::test_call_tool_certify_book_nonexistent: Test expects
+  "not found" but make returns "No rule to make target".
+
+Terminal window cleanup note (2026-04-05):
+The last ~6 tests (test_max_sessions_limit, test_eof_detection,
+test_broken_pipe_on_terminate, test_broken_pipe_on_send_command,
+test_restore_nonexistent_checkpoint, test_checkpoint_limit_per_session)
+leave Terminal log viewer windows open after the test run.  These tests
+kill ACL2 processes directly or leave sessions uncleaned, bypassing
+end_session which is where close_log_viewer is called.  This is a test
+cleanup issue, not a production concern.
+"""
 
 import asyncio
 from typing import Any
@@ -14,6 +34,16 @@ from acl2_mcp.server import (
 )
 
 
+def extract_session_id(text: str) -> str:
+    """Extract session ID from start_session response text.
+
+    The response format is:
+        Session started successfully. ID: <uuid>
+        Log file: /path/to/log
+    """
+    return text.split("ID: ")[1].split("\n")[0].strip()
+
+
 @pytest.mark.asyncio
 async def test_start_session() -> None:
     """Test starting a new session."""
@@ -27,7 +57,7 @@ async def test_start_session() -> None:
     assert "ID:" in result[0].text
 
     # Extract session ID for cleanup
-    session_id = result[0].text.split("ID: ")[1].strip()
+    session_id = extract_session_id(result[0].text)
 
     # Cleanup
     await call_tool("end_session", {"session_id": session_id})
@@ -43,7 +73,7 @@ async def test_start_session_no_name() -> None:
     assert len(result) == 1
     assert "Session started successfully" in result[0].text
 
-    session_id = result[0].text.split("ID: ")[1].strip()
+    session_id = extract_session_id(result[0].text)
     await call_tool("end_session", {"session_id": session_id})
 
 
@@ -52,7 +82,7 @@ async def test_end_session() -> None:
     """Test ending a session."""
     # Start a session first
     start_result = await call_tool("start_session", {})
-    session_id = start_result[0].text.split("ID: ")[1].strip()
+    session_id = extract_session_id(start_result[0].text)
 
     # End the session
     end_result = await call_tool("end_session", {"session_id": session_id})
@@ -89,7 +119,7 @@ async def test_list_sessions_with_active() -> None:
 
     # Start a session
     start_result = await call_tool("start_session", {"name": "test-session"})
-    session_id = start_result[0].text.split("ID: ")[1].strip()
+    session_id = extract_session_id(start_result[0].text)
 
     # List sessions
     list_result = await call_tool("list_sessions", {})
@@ -108,7 +138,7 @@ async def test_evaluate_in_session() -> None:
     """Test evaluating code in a persistent session."""
     # Start session
     start_result = await call_tool("start_session", {})
-    session_id = start_result[0].text.split("ID: ")[1].strip()
+    session_id = extract_session_id(start_result[0].text)
 
     # Define a function in the session
     eval_result = await call_tool("evaluate", {
@@ -127,7 +157,7 @@ async def test_evaluate_in_session() -> None:
 async def test_session_state_persistence() -> None:
     """Test that session maintains state across multiple calls."""
     start_result = await call_tool("start_session", {})
-    session_id = start_result[0].text.split("ID: ")[1].strip()
+    session_id = extract_session_id(start_result[0].text)
 
     # Define function
     await call_tool("evaluate", {
@@ -154,7 +184,7 @@ async def test_session_state_persistence() -> None:
 async def test_undo() -> None:
     """Test undoing events in a session."""
     start_result = await call_tool("start_session", {})
-    session_id = start_result[0].text.split("ID: ")[1].strip()
+    session_id = extract_session_id(start_result[0].text)
 
     # Add some events
     await call_tool("evaluate", {
@@ -184,7 +214,7 @@ async def test_undo() -> None:
 async def test_save_and_restore_checkpoint() -> None:
     """Test saving and restoring checkpoints."""
     start_result = await call_tool("start_session", {})
-    session_id = start_result[0].text.split("ID: ")[1].strip()
+    session_id = extract_session_id(start_result[0].text)
 
     # Add an event
     await call_tool("evaluate", {
@@ -224,7 +254,7 @@ async def test_save_and_restore_checkpoint() -> None:
 async def test_get_world_state() -> None:
     """Test getting world state from a session."""
     start_result = await call_tool("start_session", {})
-    session_id = start_result[0].text.split("ID: ")[1].strip()
+    session_id = extract_session_id(start_result[0].text)
 
     # Add some events
     await call_tool("evaluate", {
@@ -249,7 +279,7 @@ async def test_get_world_state() -> None:
 async def test_retry_proof() -> None:
     """Test retrying a proof with different hints."""
     start_result = await call_tool("start_session", {})
-    session_id = start_result[0].text.split("ID: ")[1].strip()
+    session_id = extract_session_id(start_result[0].text)
 
     # Try a simple theorem first
     await call_tool("prove", {
@@ -368,7 +398,7 @@ def test_validate_integer_parameter_rejects_non_integer() -> None:
 async def test_session_code_length_limit() -> None:
     """Test that code length limits apply to sessions."""
     start_result = await call_tool("start_session", {})
-    session_id = start_result[0].text.split("ID: ")[1].strip()
+    session_id = extract_session_id(start_result[0].text)
 
     # Try to send very long code
     long_code = "a" * 2_000_000
@@ -388,7 +418,7 @@ async def test_session_code_length_limit() -> None:
 async def test_checkpoint_limit_per_session() -> None:
     """Test that checkpoint limit per session is enforced."""
     start_result = await call_tool("start_session", {})
-    session_id = start_result[0].text.split("ID: ")[1].strip()
+    session_id = extract_session_id(start_result[0].text)
 
     # Try to create 51 checkpoints (max is 50)
     for i in range(51):
@@ -422,7 +452,7 @@ async def test_invalid_session_name() -> None:
 async def test_invalid_checkpoint_name() -> None:
     """Test that invalid checkpoint names are rejected."""
     start_result = await call_tool("start_session", {})
-    session_id = start_result[0].text.split("ID: ")[1].strip()
+    session_id = extract_session_id(start_result[0].text)
 
     result = await call_tool("save_checkpoint", {
         "session_id": session_id,
@@ -440,7 +470,7 @@ async def test_invalid_checkpoint_name() -> None:
 async def test_undo_count_validation() -> None:
     """Test that undo count is validated."""
     start_result = await call_tool("start_session", {})
-    session_id = start_result[0].text.split("ID: ")[1].strip()
+    session_id = extract_session_id(start_result[0].text)
 
     # Try invalid count
     result = await call_tool("undo", {
@@ -459,7 +489,7 @@ async def test_undo_count_validation() -> None:
 async def test_get_world_state_limit_validation() -> None:
     """Test that get_world_state limit is validated."""
     start_result = await call_tool("start_session", {})
-    session_id = start_result[0].text.split("ID: ")[1].strip()
+    session_id = extract_session_id(start_result[0].text)
 
     # Try invalid limit
     result = await call_tool("get_world_state", {
@@ -478,7 +508,7 @@ async def test_get_world_state_limit_validation() -> None:
 async def test_restore_nonexistent_checkpoint() -> None:
     """Test restoring a checkpoint that doesn't exist."""
     start_result = await call_tool("start_session", {})
-    session_id = start_result[0].text.split("ID: ")[1].strip()
+    session_id = extract_session_id(start_result[0].text)
 
     result = await call_tool("restore_checkpoint", {
         "session_id": session_id,
@@ -497,7 +527,7 @@ async def test_restore_nonexistent_checkpoint() -> None:
 async def test_broken_pipe_on_send_command() -> None:
     """Test that BrokenPipeError is handled gracefully when sending commands."""
     start_result = await call_tool("start_session", {})
-    session_id = start_result[0].text.split("ID: ")[1].strip()
+    session_id = extract_session_id(start_result[0].text)
 
     # Get the session and kill the underlying process to simulate broken pipe
     session = session_manager.get_session(session_id)
@@ -525,7 +555,7 @@ async def test_broken_pipe_on_send_command() -> None:
 async def test_broken_pipe_on_terminate() -> None:
     """Test that terminating an already-dead session doesn't raise errors."""
     start_result = await call_tool("start_session", {})
-    session_id = start_result[0].text.split("ID: ")[1].strip()
+    session_id = extract_session_id(start_result[0].text)
 
     # Get the session and kill the underlying process
     session = session_manager.get_session(session_id)
@@ -549,7 +579,7 @@ async def test_cleanup_all_with_dead_sessions() -> None:
     session_ids = []
     for i in range(3):
         start_result = await call_tool("start_session", {"name": f"test-{i}"})
-        session_id = start_result[0].text.split("ID: ")[1].strip()
+        session_id = extract_session_id(start_result[0].text)
         session_ids.append(session_id)
 
     # Kill some of the processes
@@ -571,7 +601,7 @@ async def test_cleanup_all_with_dead_sessions() -> None:
 async def test_eof_detection() -> None:
     """Test that EOF from session process is detected properly."""
     start_result = await call_tool("start_session", {})
-    session_id = start_result[0].text.split("ID: ")[1].strip()
+    session_id = extract_session_id(start_result[0].text)
 
     # Get the session
     session = session_manager.get_session(session_id)

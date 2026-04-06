@@ -72,6 +72,47 @@ Claude Desktop and Claude Code, when properly configured (see below), will autom
 acl2-mcp
 ```
 
+### Configuring acl2-mcp Defaults
+
+`acl2-mcp` can load an optional config file from:
+
+- `~/.config/acl2-mcp/config.toml`
+
+We use `~/.config/` on both macOS and Linux instead of macOS
+`~/Library/Application Support/` to keep the path consistent across
+implementations and easier to type.
+
+Currently supported settings:
+
+```toml
+[session_log]
+# If true (the default), open a terminal window tailing the session log
+# and bring it to the foreground when a session starts.
+# Set to false to suppress the automatic terminal window.
+view_log_in_terminal = true
+
+# If true (the default), close the session log Terminal window when
+# the session ends.  Set to false to keep it open for review.
+# close_log_on_end = true
+
+[tool_output]
+# Maximum characters returned by a tool call before output is elided.
+# When exceeded, the first head_chars and last tail_chars are kept,
+# with an elision warning in between pointing to the session log.
+# max_output_chars = 5000
+# head_chars = 400
+# tail_chars = 4000
+
+# Enable debug logging to ~/.acl2-mcp/debug.log (default: false).
+# The log is cleared each time the server starts.
+# debug_logging = false
+```
+
+If the file is malformed, `acl2-mcp` warns and falls back to built-in defaults.
+If individual settings are unknown or invalid, `acl2-mcp` warns and ignores
+just those settings. Explicit `start_session` arguments override config-file
+defaults.
+
 ### Configuring Claude Desktop to use acl2-mcp
 
 Add this to your Claude Desktop configuration file:
@@ -327,7 +368,7 @@ mypy acl2_mcp/
 ### Running Tests
 
 ```bash
-pytest
+./venv/bin/pytest tests/ -v
 ```
 
 ## How It Works

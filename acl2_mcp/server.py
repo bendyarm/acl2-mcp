@@ -8,6 +8,7 @@ import os
 import platform
 import pty
 import re
+import shlex
 import signal
 import struct
 import subprocess
@@ -24,6 +25,8 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
+from acl2_mcp.config import ServerConfig, ToolOutputConfig, load_config
+
 
 # Security constants
 MAX_TIMEOUT = 300  # 5 minutes maximum
@@ -35,15 +38,89 @@ MAX_CHECKPOINT_NAME_LENGTH = 100  # Maximum checkpoint name length
 MAX_CHECKPOINTS_PER_SESSION = 50  # Maximum checkpoints per session
 MAX_SESSION_NAME_LENGTH = 100  # Maximum session name length
 
+_DEBUG_LOG_PATH = Path.home() / ".acl2-mcp" / "debug.log"
+_debug_logging_enabled = False
 
-# Prompt patterns for detecting command completion
-# Based on Emacs emacs-acl2.el *acl2-insert-pats*
+
+def _init_debug_logging(enabled: bool) -> None:
+    """Initialize debug logging.  If enabled, remove any stale log file."""
+    global _debug_logging_enabled
+    _debug_logging_enabled = enabled
+    if enabled:
+        try:
+            _DEBUG_LOG_PATH.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _debug_log(message: str) -> None:
+    """Append a timestamped debug message to ~/.acl2-mcp/debug.log."""
+    if not _debug_logging_enabled:
+        return
+    try:
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        with open(_DEBUG_LOG_PATH, "a") as f:
+            f.write(f"[{timestamp}] {message}\n")
+    except Exception:
+        pass
+
+
+def elide_large_output(output: str, config: ToolOutputConfig, log_file: Path | None) -> str:
+    """Elide output that exceeds the configured max size.
+
+    Returns the original output if within limits.  Otherwise returns
+    the first head_chars, an elision warning, and the last tail_chars.
+    """
+    if len(output) <= config.max_output_chars:
+        return output
+
+    head = output[:config.head_chars]
+    tail = output[-config.tail_chars:]
+    log_msg = f"  See session log: {log_file}" if log_file else ""
+    elision = f"\n[WARNING: Large output elided ({len(output)} chars).{log_msg}]\n"
+    return head + elision + tail
+
+
+# How long to wait (seconds) after seeing a potential prompt before confirming
+# it.  If more PTY data arrives within this window the candidate is
+# re-absorbed into normal output processing, avoiding false positives on
+# output lines that happen to match a prompt pattern.
+PROMPT_SETTLE_SECONDS = 0.2
+
+# Prompt patterns for detecting command completion.
+#
+# These are the "positive" patterns from emacs-acl2.el *acl2-insert-pats*
+# (commented-out alternative in that file).  Each pattern matches a line
+# (with no trailing newline) that could be a Lisp or ACL2 prompt.
+#
+# Because these patterns are broad (especially ".*>[ ]*$" and ".*\* $"),
+# prompt detection uses a settle delay (PROMPT_SETTLE_SECONDS) to
+# distinguish real prompts from mid-output lines that happen to match.
 PROMPT_PATTERNS = [
     re.compile(r'.*>[ ]*$'),      # ACL2, GCL, CLISP, LispWorks, CCL debugger
     re.compile(r'.*\] $'),        # SBCL debugger
     re.compile(r'.*\* $'),        # CMUCL, SBCL
 ]
 # Other Lisp prompts not included: ".*[?] $" (CCL), ".*): $" (Allegro CL)
+
+
+def prompt_depth(text: str) -> int:
+    """Return the LD nesting depth from an ACL2 prompt.
+
+    Counts trailing '>' characters (before optional spaces).
+    'ACL2 !>'   → 1   (top-level)
+    'ACL2 !>>'  → 2   (inside one LD)
+    'ACL2 !>>>' → 3   (nested LD)
+    Non-'>' prompts (SBCL debugger '0] ', raw Lisp '* ') → 0.
+    """
+    stripped = text.rstrip()
+    count = 0
+    for ch in reversed(stripped):
+        if ch == '>':
+            count += 1
+        else:
+            break
+    return count
 
 
 def matches_prompt_pattern(text: str) -> bool:
@@ -287,6 +364,7 @@ class ACL2Session:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     log_file: Optional[Path] = None
     log_handle: Optional[IO[str]] = None
+    tool_output_config: ToolOutputConfig = field(default_factory=ToolOutputConfig)
 
     # PTY infrastructure
     master_fd: Optional[int] = None
@@ -299,9 +377,22 @@ class ACL2Session:
     # Background I/O infrastructure
     # Unbounded queue to prevent blocking when output is very fast (e.g., Axe simplification)
     merge_queue: asyncio.Queue[tuple[float, int, str, str]] = field(default_factory=lambda: asyncio.Queue(maxsize=0))  # (timestamp, seq_id, stream_type, line)
-    output_buffer: list[str] = field(default_factory=list)  # Logged output for send_command to search
+    output_buffer: list[tuple[int, str]] = field(default_factory=list)  # (seq_id, line) for send_command
     sequence_counter: int = 0  # Atomic counter for tie-breaking
     sequence_lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # Protects sequence_counter
+
+    # Prompt detection — sequenced to avoid stale-event corruption.
+    # _flush_prompt increments prompt_seq and notifies via prompt_condition.
+    # send_command captures prompt_seq before sending and waits for it to
+    # increase, so stale confirmations from earlier commands are ignored.
+    _prompt_flush_handle: Optional[asyncio.TimerHandle] = field(default=None, repr=False)
+    prompt_seq: int = 0
+    last_prompt_text: str = ""
+    _confirm_max_depth: int = 1  # Only confirm prompts at this depth or less
+    prompt_condition: asyncio.Condition = field(default_factory=asyncio.Condition)
+    # Serializes access to partial_line_buffer and _prompt_flush_handle
+    # across concurrent _process_pty_chunk / _flush_prompt coroutines.
+    _chunk_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     # Background task references
     # Note: PTY reader uses loop.add_reader() callback (event-driven, tracked via reader_registered)
@@ -309,6 +400,7 @@ class ACL2Session:
 
     # Shutdown coordination
     shutdown_event: asyncio.Event = field(default_factory=asyncio.Event)
+    _end_marker_written: bool = False
 
     async def send_command(self, command: str, timeout: int | None = None) -> str:
         """
@@ -338,11 +430,19 @@ class ACL2Session:
             validated_timeout = validate_timeout(timeout)
 
             try:
-                # Record buffer position BEFORE adding anything to queues or writing to PTY.
-                # This is critical: during the await calls below, _logger_task can run and
-                # append items to output_buffer. If we record start_buffer_index after those
-                # awaits, we might miss the response entirely (race condition causing timeouts).
-                start_buffer_index = len(self.output_buffer)
+                # Capture sequence counters BEFORE adding anything to queues or
+                # writing to PTY.  During the await calls below, the event loop
+                # can run _logger_task / _flush_prompt, which append to
+                # output_buffer and increment prompt_seq.  If we capture these
+                # after those awaits, we might miss the response entirely.
+                start_seq_id = self.sequence_counter
+                start_prompt_seq = self.prompt_seq
+                # Set the max depth for prompt confirmation.  Only prompts
+                # at this depth or less will be confirmed.  This prevents
+                # intermediate LD prompts (deeper) from triggering early
+                # return, while still allowing responses at the current
+                # depth (e.g., inside interactive LD).
+                self._confirm_max_depth = prompt_depth(self.last_prompt_text) or 1
 
                 # Log input followed by an INPUT timestamp marker for easier auditing
                 timestamp_mono = time.monotonic()
@@ -390,56 +490,76 @@ class ACL2Session:
                         return "Error: Session connection lost"
                     raise
 
-                # Wait for prompt to appear in output_buffer (populated by background logger task)
-                # Note: start_buffer_index was set at the beginning of this try block
+                # Wait for a confirmed prompt from the chunk processor.
+                # The chunk processor detects potential prompts in partial
+                # buffers and waits PROMPT_SETTLE_SECONDS before confirming,
+                # then increments prompt_seq and notifies via prompt_condition.
+                #
+                # We capture prompt_seq *before* sending so that stale
+                # confirmations from earlier commands (e.g., LD intermediate
+                # prompts still being flushed) are ignored.
                 start_time = time.time()
-                prompt_found = False
-                output_lines: list[str] = []
+                _debug_log(f"send_command: start_seq_id={start_seq_id}, start_prompt_seq={start_prompt_seq}, output_buffer_len={len(self.output_buffer)}")
 
                 try:
-                    while True:
-                        # Check if prompt has appeared in buffer
-                        for i in range(start_buffer_index, len(self.output_buffer)):
-                            line = self.output_buffer[i]
-                            output_lines.append(line)
+                    async with self.prompt_condition:
+                        while self.prompt_seq <= start_prompt_seq:
+                            # Compute wait timeout
+                            if validated_timeout is not None:
+                                elapsed = time.time() - start_time
+                                if elapsed >= validated_timeout:
+                                    # On timeout, check if there's an
+                                    # unconfirmed prompt in the partial
+                                    # buffer and adopt it as the current
+                                    # prompt.  This allows subsequent
+                                    # commands to use the correct depth
+                                    # (e.g., after (ld *standard-oi*)
+                                    # produces a depth-2 prompt).
+                                    self._adopt_pending_prompt()
+                                    return f"Error: Command execution timed out after {validated_timeout} seconds"
+                                remaining = max(0.1, validated_timeout - elapsed)
+                                wait_timeout = min(remaining, 1.0)
+                            else:
+                                wait_timeout = 1.0
 
-                            # Check if this line matches any prompt pattern
-                            line_stripped = line.rstrip('\n')
-                            for pattern in PROMPT_PATTERNS:
-                                if pattern.match(line_stripped):
-                                    prompt_found = True
-                                    break
+                            try:
+                                await asyncio.wait_for(
+                                    self.prompt_condition.wait(),
+                                    timeout=wait_timeout,
+                                )
+                            except asyncio.TimeoutError:
+                                pass
 
-                            if prompt_found:
-                                break
+                            # Check if session has been shutdown
+                            if self.shutdown_event.is_set():
+                                return "Error: Session terminated during command execution"
 
-                        if prompt_found:
-                            break
+                except Exception as e:
+                    _debug_log(f"send_command exception: {type(e).__name__}: {e}")
+                    return f"Error: Session communication failed ({type(e).__name__}: {e})"
 
-                        # Check timeout
-                        if validated_timeout is not None:
-                            elapsed = time.time() - start_time
-                            if elapsed >= validated_timeout:
-                                return f"Error: Command execution timed out after {validated_timeout} seconds"
+                _debug_log(f"send_command: prompt confirmed, prompt_seq={self.prompt_seq}, last_prompt='{self.last_prompt_text}'")
 
-                        # Update our position in buffer for next check
-                        start_buffer_index = len(self.output_buffer)
+                # Give the logger task a moment to flush the prompt from
+                # the merge queue into output_buffer.
+                await asyncio.sleep(0.05)
 
-                        # Wait a bit before checking again (avoid busy loop)
-                        await asyncio.sleep(0.1)
+                # Collect output lines produced after the command was sent,
+                # identified by seq_id.  This is robust against buffer
+                # trimming since we match on monotonic IDs, not positions.
+                output_lines = [line for sid, line in self.output_buffer if sid > start_seq_id]
 
-                        # Check if session has been shutdown
-                        if self.shutdown_event.is_set():
-                            return "Error: Session terminated during command execution"
+                # Detect if trimming lost some of our output
+                if self.output_buffer and self.output_buffer[0][0] > start_seq_id + 1:
+                    _debug_log(f"send_command: output truncated, earliest retained seq_id={self.output_buffer[0][0]}, start_seq_id={start_seq_id}")
 
-                except Exception:
-                    return "Error: Session communication failed"
+                _debug_log(f"send_command: collected {len(output_lines)} lines (start_seq_id={start_seq_id})")
 
                 self.event_counter += 1
 
-                # Return collected output
+                # Return collected output, eliding if too large
                 output = "".join(output_lines).strip()
-                return output
+                return elide_large_output(output, self.tool_output_config, self.log_file)
 
             except OSError as e:
                 if e.errno in (errno.EIO, errno.EBADF, errno.EPIPE):
@@ -578,61 +698,165 @@ class ACL2Session:
         Process a chunk of data from the PTY.
         Tags lines with timestamps, pushes to merge queue for logging.
 
+        Uses _chunk_lock to serialize access to partial_line_buffer and
+        _prompt_flush_handle.  Multiple _process_pty_chunk coroutines can
+        be scheduled concurrently (via ensure_future from _on_pty_readable),
+        so the lock prevents interleaving that could corrupt state.
+
         Args:
             chunk: Raw bytes from PTY (may contain partial lines, carriage returns, etc.)
         """
-        try:
-            # Process complete lines and detect partial prompts, preserving
-            # incomplete bytes across chunks via partial_line_buffer.
-            if self.partial_line_buffer:
-                buffer = self.partial_line_buffer + chunk
-                self.partial_line_buffer.clear()
-            else:
-                buffer = chunk
+        async with self._chunk_lock:
+            try:
+                # Cancel any pending prompt flush — new data arrived, so the
+                # partial buffer we were about to flush as a prompt was actually
+                # mid-output.
+                if self._prompt_flush_handle is not None:
+                    self._prompt_flush_handle.cancel()
+                    self._prompt_flush_handle = None
 
-            while buffer:
-                newline_idx = buffer.find(b'\n')
-
-                if newline_idx >= 0:
-                    # Extract complete line (including newline)
-                    line = buffer[:newline_idx + 1]
-                    buffer = buffer[newline_idx + 1:]
-
-                    # Normalize CRLF -> LF for consistency
-                    if line.endswith(b"\r\n"):
-                        line = line[:-2] + b"\n"
-
-                    # Tag and push to queue
-                    timestamp = time.monotonic()
-                    seq_id = await self._get_next_sequence_id()
-                    decoded_line = line.decode(errors='replace')
-                    await self.merge_queue.put((timestamp, seq_id, "stdout", decoded_line))
+                # Process complete lines and detect partial prompts, preserving
+                # incomplete bytes across chunks via partial_line_buffer.
+                if self.partial_line_buffer:
+                    buffer = self.partial_line_buffer + chunk
+                    self.partial_line_buffer.clear()
                 else:
-                    # Remaining buffer has no newline
-                    # Check if it matches a prompt pattern (prompts don't have newlines)
-                    try:
-                        decoded_buffer = buffer.decode(errors='replace')
-                        # Some prompts may be terminated with a carriage return (\r) but no newline.
-                        # Strip trailing \r for matching purposes so we don't miss the prompt.
-                        prompt_candidate = decoded_buffer.rstrip('\r')
-                        if matches_prompt_pattern(prompt_candidate):
-                            # This is a prompt - flush it immediately
-                            timestamp = time.monotonic()
-                            seq_id = await self._get_next_sequence_id()
-                            await self.merge_queue.put((timestamp, seq_id, "stdout", prompt_candidate))
-                            buffer = b""
-                        else:
-                            # Not a prompt, might be partial line - don't queue yet
-                            # It will be completed when more data arrives; preserve it
-                            self.partial_line_buffer.extend(buffer)
-                            break
-                    except UnicodeDecodeError:
-                        # Buffer contains partial UTF-8 sequence; preserve it for the next chunk
+                    buffer = chunk
+
+                while buffer:
+                    newline_idx = buffer.find(b'\n')
+
+                    if newline_idx >= 0:
+                        # Extract complete line (including newline)
+                        line = buffer[:newline_idx + 1]
+                        buffer = buffer[newline_idx + 1:]
+
+                        # Normalize CRLF -> LF for consistency
+                        if line.endswith(b"\r\n"):
+                            line = line[:-2] + b"\n"
+
+                        # Tag and push to queue
+                        timestamp = time.monotonic()
+                        seq_id = await self._get_next_sequence_id()
+                        decoded_line = line.decode(errors='replace')
+                        await self.merge_queue.put((timestamp, seq_id, "stdout", decoded_line))
+                    else:
+                        # Remaining buffer has no newline — could be a prompt or
+                        # mid-output.  Store it in partial_line_buffer either way.
+                        # If it looks like a prompt, schedule a delayed flush; if
+                        # more data arrives before the delay fires, the flush is
+                        # cancelled and the partial buffer is re-processed with
+                        # the new chunk.
                         self.partial_line_buffer.extend(buffer)
+
+                        try:
+                            decoded_buffer = buffer.decode(errors='replace')
+                            prompt_candidate = decoded_buffer.rstrip('\r')
+                            if matches_prompt_pattern(prompt_candidate):
+                                self._schedule_prompt_flush()
+                        except UnicodeDecodeError:
+                            pass  # Partial UTF-8; wait for more bytes
+
                         break
 
-        except Exception as e:
-            print(f"Error processing PTY chunk: {e}", file=sys.stderr)
+            except Exception as e:
+                print(f"Error processing PTY chunk: {e}", file=sys.stderr)
+
+    def _schedule_prompt_flush(self) -> None:
+        """Schedule a delayed flush of the partial_line_buffer as a prompt.
+
+        If no new PTY data arrives within PROMPT_SETTLE_SECONDS, the partial
+        buffer is flushed as a prompt line.  If new data does arrive, the
+        timer is cancelled in _process_pty_chunk and the partial buffer is
+        re-processed normally.
+        """
+        loop = asyncio.get_event_loop()
+        self._prompt_flush_handle = loop.call_later(
+            PROMPT_SETTLE_SECONDS,
+            lambda: asyncio.ensure_future(self._flush_prompt()),
+        )
+
+    def _adopt_pending_prompt(self) -> None:
+        """Adopt an unconfirmed prompt as the current prompt level.
+
+        Called on timeout.  Checks both partial_line_buffer (prompt not
+        yet flushed) and the last line in output_buffer (prompt flushed
+        to log but not confirmed).  Updates last_prompt_text so that
+        subsequent commands use the correct depth for
+        _confirm_max_depth.  This handles the case where
+        (ld *standard-oi*) produces a depth-2 prompt that was never
+        confirmed.
+        """
+        # Check partial_line_buffer first
+        if self.partial_line_buffer:
+            try:
+                decoded = bytes(self.partial_line_buffer).decode(errors='replace')
+                candidate = decoded.rstrip('\r')
+                if matches_prompt_pattern(candidate):
+                    self.last_prompt_text = candidate
+                    _debug_log(f"_adopt_pending_prompt: adopted from partial_line_buffer '{candidate}'")
+                    return
+            except Exception:
+                pass
+
+        # Check the last line in output_buffer (prompt was flushed but not confirmed)
+        if self.output_buffer:
+            _seq_id, last_line = self.output_buffer[-1]
+            candidate = last_line.rstrip('\n').rstrip('\r')
+            if matches_prompt_pattern(candidate):
+                self.last_prompt_text = candidate
+                _debug_log(f"_adopt_pending_prompt: adopted from output_buffer '{candidate}'")
+
+    async def _flush_prompt(self) -> None:
+        """Flush the partial_line_buffer as a confirmed prompt.
+
+        Called after the settle delay (PROMPT_SETTLE_SECONDS) with no
+        new data.  Depth-1 prompts (top-level) are confirmed immediately.
+        Depth-2+ prompts (inside LD) are NOT confirmed here — they are
+        left in partial_line_buffer.  If ACL2 continues processing the
+        next form, new data will arrive and _process_pty_chunk will
+        absorb the buffer.  If LD finishes, the depth-1 final prompt
+        will be confirmed normally.  If the command times out,
+        send_command handles that independently.
+
+        Uses _chunk_lock to serialize with _process_pty_chunk.
+        """
+        async with self._chunk_lock:
+            self._prompt_flush_handle = None
+            if not self.partial_line_buffer:
+                return
+
+            try:
+                decoded = bytes(self.partial_line_buffer).decode(errors='replace')
+                prompt_candidate = decoded.rstrip('\r')
+                if not matches_prompt_pattern(prompt_candidate):
+                    return
+
+                depth = prompt_depth(prompt_candidate)
+                if depth > self._confirm_max_depth:
+                    # Deeper than the starting depth — likely an
+                    # intermediate prompt during LD.  Don't confirm
+                    # (don't increment prompt_seq or notify), but DO
+                    # flush to the log/output_buffer so the prompt
+                    # appears in the correct position in the log.
+                    self.partial_line_buffer.clear()
+                    timestamp = time.monotonic()
+                    seq_id = await self._get_next_sequence_id()
+                    await self.merge_queue.put((timestamp, seq_id, "stdout", prompt_candidate))
+                    _debug_log(f"_flush_prompt: depth-{depth} prompt '{prompt_candidate}' — flushed to log but not confirming (deeper than max {self._confirm_max_depth})")
+                    return
+
+                self.partial_line_buffer.clear()
+                timestamp = time.monotonic()
+                seq_id = await self._get_next_sequence_id()
+                await self.merge_queue.put((timestamp, seq_id, "stdout", prompt_candidate))
+                self.last_prompt_text = prompt_candidate
+                self.prompt_seq += 1
+                async with self.prompt_condition:
+                    self.prompt_condition.notify_all()
+                _debug_log(f"_flush_prompt: confirmed prompt '{prompt_candidate}' (seq={self.prompt_seq})")
+            except Exception as e:
+                print(f"Error flushing prompt: {e}", file=sys.stderr)
 
     async def _handle_pty_eof(self) -> None:
         """Handle EOF from PTY master (session ended)."""
@@ -646,11 +870,13 @@ class ACL2Session:
                     await self.merge_queue.put((timestamp, seq_id, "stdout", decoded))
                 finally:
                     self.partial_line_buffer.clear()
-            timestamp = time.monotonic()
-            seq_id = await self._get_next_sequence_id()
-            end_time = time.strftime("%Y-%m-%d %H:%M:%S")
-            end_marker = f"[{end_time} SESSION ENDED]\n"
-            await self.merge_queue.put((timestamp, seq_id, "stdout", end_marker))
+            # Only write SESSION ENDED if end_session hasn't already written one.
+            if not self._end_marker_written:
+                timestamp = time.monotonic()
+                seq_id = await self._get_next_sequence_id()
+                end_time = time.strftime("%Y-%m-%d %H:%M:%S")
+                end_marker = f"\n[{end_time} SESSION ENDED]\n"
+                await self.merge_queue.put((timestamp, seq_id, "stdout", end_marker))
         except Exception as e:
             print(f"Error handling PTY EOF: {e}", file=sys.stderr)
         finally:
@@ -684,8 +910,8 @@ class ACL2Session:
                         await log_handle.write(line)
                         await log_handle.flush()
 
-                        # Also store in output_buffer for send_command to search for prompts
-                        self.output_buffer.append(line)
+                        # Also store in output_buffer for send_command to collect output
+                        self.output_buffer.append((seq_id, line))
 
                         # Check if buffer is getting too large (keep last 50000 lines)
                         if len(self.output_buffer) > 50000:
@@ -705,7 +931,7 @@ class ACL2Session:
                         timestamp, seq_id, stream_type, line = self.merge_queue.get_nowait()
                         await log_handle.write(line)
                         await log_handle.flush()
-                        self.output_buffer.append(line)
+                        self.output_buffer.append((seq_id, line))
                     except asyncio.QueueEmpty:
                         break
                     except Exception as e:
@@ -803,26 +1029,34 @@ class ACL2Session:
                     await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
 
 
-def open_log_viewer(log_file: Path, lines: int = 50) -> None:
+def _session_window_title(session_id: str) -> str:
+    """Return the Terminal custom title for a session's log viewer window."""
+    short_id = session_id.split("-")[0]
+    return f"ACL2 Log {short_id}"
+
+
+def open_log_viewer(log_file: Path, lines: int = 50, session_id: str = "") -> None:
     """
-    Open a terminal window showing tail -f of the log file.
+    Open a terminal window showing tail -f of the log file and bring it to the foreground.
 
     Args:
         log_file: Path to the log file to view
         lines: Number of lines to show initially (default: 50)
+        session_id: Session ID, used to set a unique window title
     """
     system = platform.system()
 
     try:
         if system == "Darwin":  # macOS
-            # Use osascript to open Terminal.app in a new window
-            script = f'''
-tell application "Terminal"
-    set newWindow to do script "tail -n {lines} -f '{log_file}'"
-    set custom title of front window to "ACL2 Session Log"
-    activate
-end tell
-'''
+            quoted_log_file = shlex.quote(str(log_file))
+            window_title = _session_window_title(session_id)
+            script = (
+                'tell application "Terminal"\n'
+                f'    do script "tail -n {lines} -f {quoted_log_file}"\n'
+                f'    set custom title of front window to "{window_title}"\n'
+                "    activate\n"
+                "end tell\n"
+            )
             subprocess.Popen(["osascript", "-e", script])
 
         elif system == "Linux":
@@ -850,10 +1084,118 @@ end tell
         pass
 
 
+def show_session_log(log_file: Path, lines: int = 50, session_id: str = "") -> None:
+    """
+    Show the session log in a terminal window and bring it to the foreground.
+
+    If a Terminal window for this session is already open, activate it.
+    Otherwise, open a new Terminal window tailing the log file.
+
+    Args:
+        log_file: Path to the log file to view
+        lines: Number of lines to show initially if opening a new window (default: 50)
+        session_id: Session ID, used to find or create the correct window
+    """
+    system = platform.system()
+
+    try:
+        if system == "Darwin":  # macOS
+            quoted_log_file = shlex.quote(str(log_file))
+            window_title = _session_window_title(session_id)
+            script = (
+                'tell application "Terminal"\n'
+                '    set foundWindow to false\n'
+                '    repeat with w in windows\n'
+                '        try\n'
+                f'            if custom title of w is "{window_title}" then\n'
+                '                set frontmost of w to true\n'
+                '                set foundWindow to true\n'
+                '                exit repeat\n'
+                '            end if\n'
+                '        end try\n'
+                '    end repeat\n'
+                '    if foundWindow is false then\n'
+                f'        do script "tail -n {lines} -f {quoted_log_file}"\n'
+                f'        set custom title of front window to "{window_title}"\n'
+                '    end if\n'
+                '    activate\n'
+                'end tell\n'
+            )
+            subprocess.Popen(["osascript", "-e", script])
+
+        elif system == "Linux":
+            # On Linux, just open a new viewer (no easy way to find existing windows)
+            open_log_viewer(log_file, lines, session_id)
+
+        elif system == "Windows":
+            open_log_viewer(log_file, lines, session_id)
+
+    except Exception:
+        pass
+
+
+def close_log_viewer(session_id: str, log_file: Path | None = None) -> None:
+    """Close the Terminal window for a session's log viewer.
+
+    Kills the tail process following the log file (so Terminal won't
+    show a "terminate running processes?" dialog), then closes the
+    window by its custom title.  Silently does nothing if the window
+    or process doesn't exist.
+    """
+    system = platform.system()
+
+    try:
+        if system == "Darwin":
+            # To close the Terminal window without a "terminate running
+            # processes?" dialog, we need to exit the shell cleanly.
+            # The window runs "tail -f <logfile>" as a foreground
+            # process.  We kill tail via pkill, wait for the shell to
+            # return to a prompt, send "exit" to exit the shell, then
+            # close the window.
+            window_title = _session_window_title(session_id)
+            if log_file:
+                try:
+                    subprocess.run(
+                        ["pkill", "-f", f"tail.*{log_file.name}"],
+                        capture_output=True, timeout=2,
+                    )
+                except Exception:
+                    pass
+
+            script = (
+                'delay 0.3\n'
+                'tell application "Terminal"\n'
+                '    repeat with w in windows\n'
+                '        try\n'
+                f'            if custom title of w is "{window_title}" then\n'
+                '                do script "exec true" in w\n'
+                '                exit repeat\n'
+                '            end if\n'
+                '        end try\n'
+                '    end repeat\n'
+                'end tell\n'
+                'delay 0.5\n'
+                'tell application "Terminal"\n'
+                '    repeat with w in windows\n'
+                '        try\n'
+                f'            if custom title of w is "{window_title}" then\n'
+                '                close w\n'
+                '                exit repeat\n'
+                '            end if\n'
+                '        end try\n'
+                '    end repeat\n'
+                'end tell\n'
+            )
+            subprocess.Popen(["osascript", "-e", script])
+    except Exception:
+        pass
+
+
 class SessionManager:
     """Manages persistent ACL2 sessions."""
 
-    def __init__(self) -> None:
+    def __init__(self, config: ServerConfig | None = None) -> None:
+        self.config = config or ServerConfig()
         self.sessions: dict[str, ACL2Session] = {}
         self._cleanup_task: Optional[asyncio.Task[None]] = None
 
@@ -861,7 +1203,7 @@ class SessionManager:
         self,
         name: Optional[str] = None,
         enable_logging: bool = True,
-        enable_log_viewer: bool = True,
+        view_log_in_terminal: bool | None = None,
         log_tail_lines: int = 50,
         cwd: Optional[str] = None
     ) -> tuple[str, str]:
@@ -871,7 +1213,8 @@ class SessionManager:
         Args:
             name: Optional human-readable name for the session
             enable_logging: If True, log all I/O to a session file (default: True)
-            enable_log_viewer: If True, open a terminal window showing the log (default: True)
+            view_log_in_terminal: If True, open a terminal window tailing the session
+                log and bring it to the foreground (default: True)
             log_tail_lines: Number of lines to show in log viewer (default: 50)
             cwd: Optional working directory for the ACL2 process (default: None, uses current directory)
 
@@ -887,6 +1230,12 @@ class SessionManager:
                 name = validate_session_name(name)
             except ValueError as e:
                 return "", f"Error: Invalid session name - {e}"
+
+        effective_view_log_in_terminal = (
+            self.config.session_log.view_log_in_terminal
+            if view_log_in_terminal is None
+            else view_log_in_terminal
+        )
 
         session_id = str(uuid.uuid4())
 
@@ -972,6 +1321,7 @@ class SessionManager:
                 log_file=log_file,
                 master_fd=master_fd,
                 ring_buffer=bytearray(),
+                tool_output_config=self.config.tool_output,
             )
 
             # Start background I/O tasks immediately
@@ -995,7 +1345,7 @@ class SessionManager:
             startup_complete = False
             while time.time() - start_time < 10.0:  # 10 second timeout
                 # Check if we've seen the ACL2 prompt
-                for line in session.output_buffer:
+                for _sid, line in session.output_buffer:
                     if "ACL2 !>" in line:
                         startup_complete = True
                         break
@@ -1004,8 +1354,8 @@ class SessionManager:
                 await asyncio.sleep(0.1)  # Check every 100ms
 
             # Open log viewer if requested
-            if enable_log_viewer and log_file:
-                open_log_viewer(log_file, log_tail_lines)
+            if effective_view_log_in_terminal and log_file:
+                open_log_viewer(log_file, log_tail_lines, session_id)
 
             self.sessions[session_id] = session
 
@@ -1036,8 +1386,24 @@ class SessionManager:
         if not session:
             return f"Error: Session {session_id} not found"
 
+        # Write end marker to log before terminating.
+        # Set _end_marker_written so _handle_pty_eof doesn't write a
+        # duplicate marker when the PTY closes during terminate().
+        session._end_marker_written = True
+        if session.log_file:
+            header_time = time.strftime("%Y-%m-%d %H:%M:%S")
+            end_marker = f"\n[{header_time} SESSION ENDED]\n"
+            seq_id = await session._get_next_sequence_id()
+            await session.merge_queue.put((time.monotonic(), seq_id, "session", end_marker))
+            # Give the logger task a moment to flush
+            await asyncio.sleep(0.1)
+
         await session.terminate()
         del self.sessions[session_id]
+
+        # Close the log viewer Terminal window if configured
+        if self.config.session_log.close_log_on_end:
+            close_log_viewer(session_id, session.log_file)
 
         return f"Session {session_id} ended successfully"
 
@@ -1137,7 +1503,9 @@ class SessionManager:
 
 
 # Global session manager
-session_manager = SessionManager()
+server_config = load_config()
+_init_debug_logging(server_config.debug_logging)
+session_manager = SessionManager(server_config)
 
 app: Server = Server("acl2-mcp")
 
@@ -1161,10 +1529,10 @@ async def list_tools() -> list[Tool]:
                         "description": "If true, log all I/O to a session file in ~/.acl2-mcp/sessions/ (default: true)",
                         "default": True,
                     },
-                    "enable_log_viewer": {
+                    "view_log_in_terminal": {
                         "type": "boolean",
-                        "description": "If true, open a terminal window showing the session log (default: false)",
-                        "default": False,
+                        "description": "If true, open a terminal window tailing the session log and bring it to the foreground. If not specified, uses the config default (built-in default: true).",
+                        "default": True,
                     },
                     "log_tail_lines": {
                         "type": "number",
@@ -1198,6 +1566,25 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {},
+            },
+        ),
+        Tool(
+            name="show_session_log",
+            description="Show the session log in a terminal window. If a Terminal window is already tailing this session's log, it is activated and brought to the foreground. If not, a new Terminal window is opened. Requires logging to be enabled for the session.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "ID of the session whose log to show",
+                    },
+                    "log_tail_lines": {
+                        "type": "number",
+                        "description": "Number of lines to show initially if opening a new window (default: 50)",
+                        "default": 50,
+                    },
+                },
+                "required": ["session_id"],
             },
         ),
         Tool(
@@ -1829,13 +2216,13 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
     if name == "start_session":
         session_name = arguments.get("name")
         enable_logging = arguments.get("enable_logging", True)
-        enable_log_viewer = arguments.get("enable_log_viewer", True)
+        view_log_in_terminal = arguments.get("view_log_in_terminal")
         log_tail_lines = arguments.get("log_tail_lines", 50)
         cwd = arguments.get("cwd")
         session_id, message = await session_manager.start_session(
             session_name,
             enable_logging,
-            enable_log_viewer,
+            view_log_in_terminal,
             log_tail_lines,
             cwd
         )
@@ -1862,6 +2249,32 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             TextContent(
                 type="text",
                 text=message,
+            )
+        ]
+
+    elif name == "show_session_log":
+        session_id = arguments["session_id"]
+        log_tail_lines = arguments.get("log_tail_lines", 50)
+        session = session_manager.get_session(session_id)
+        if not session:
+            return [
+                TextContent(
+                    type="text",
+                    text=f"Error: Session {session_id} not found",
+                )
+            ]
+        if not session.log_file:
+            return [
+                TextContent(
+                    type="text",
+                    text=f"Error: Session {session_id} does not have logging enabled",
+                )
+            ]
+        show_session_log(session.log_file, log_tail_lines, session_id)
+        return [
+            TextContent(
+                type="text",
+                text=f"Opened session log in Terminal: {session.log_file}",
             )
         ]
 
