@@ -148,11 +148,11 @@ claude mcp add acl2 /path/to/acl2-mcp/venv/bin/acl2-mcp
 
 This makes acl2-mcp available only when working in that specific project directory. Good for teams with per-project tool configurations.
 
-**Global configuration** (for system-wide availability):
+**User-wide configuration** (for system-wide availability):
 
 From any directory, run:
 ```bash
-claude mcp add acl2 /path/to/acl2-mcp/venv/bin/acl2-mcp --global
+claude mcp add --scope user acl2 /path/to/acl2-mcp/venv/bin/acl2-mcp
 ```
 
 This makes acl2-mcp available in all Claude Code sessions regardless of directory. Good if you want ACL2 tools everywhere.
