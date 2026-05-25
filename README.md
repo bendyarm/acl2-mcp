@@ -1,13 +1,19 @@
 # ACL2 MCP Server
 
-> ⚠️ **Early Beta - Development in Progress**
-> This is an early beta version that was rapidly developed. While functional and tested, expect rough edges, potential bugs, and breaking changes. Use at your own risk in production environments.
+> ⚠️ **Use at your own Risk**
+> While this is functional and tested with Claude, you should expect bugs and changes.  Do not use with sensitive data.  Currently the MCP server does not practically limit what ACL2 can do.
 
-A Model Context Protocol (MCP) server that provides tools for interacting with the ACL2 theorem prover.
+This Model Context Protocol (MCP) server provides tools for agentic interaction with the ACL2 theorem prover.
+
+`acl2-mcp` has been tested most with Claude Code CLI, so the instructions are best for that platform.
+There has been some use with Claude Desktop, so we believe that will work as well.
+There is an `AGENTS.md` file that should work with other agentic models.  And, of course,
+any client that can make use of the tools is welcome.  Feedback is appreciated.
 
 ## Features
 
-This MCP server exposes 15 tools for working with ACL2, including support for persistent sessions that enable incremental development:
+This MCP server exposes 15 tools for working with ACL2, including support for persistent sessions that enable incremental development.
+(Note: we are not sure these are all useful; the list may change.)
 
 ### Session Management Tools
 - **start_session**: Create a persistent ACL2 session for incremental development
@@ -47,32 +53,105 @@ All code-based tools support an optional `session_id` parameter for incremental 
   - If you are using your own script named `acl`, make sure it has a shebang as the first line: `#!/bin/bash`
 - ACL2 books build tools (cert.pl) available in PATH
   - Add `/path/to/acl2/books/build` to your PATH for book certification support
+- An MCP client.  These instructions include details on how to set up Claude Code
+  to use `acl2-mcp`, but other clients can also be used.
 
 ## Installation
 
-```bash
-# Clone the repository
-cd acl2-mcp
+The steps below get you a working default setup with Claude Code.
 
-# Create and activate virtual environment
+For Claude Desktop or other configuration scopes, see
+[Configuration](#configuration).
+
+### 1. Install the package
+
+Clone the repository, then `cd` into it:
+
+```bash
+git clone <repo-url>
+cd acl2-mcp
+```
+
+Create and activate a virtual environment:
+
+```bash
 python3 -m venv venv
 source venv/bin/activate
+```
 
-# Install the package
+Install the package:
+
+```bash
 pip install -e .
 ```
 
-## Usage
+### 2. Register with Claude Code
 
-### Running the Server
+To make `acl2-mcp` start automatically when you run Claude Code,
+follow these instructions.
 
-Claude Desktop and Claude Code, when properly configured (see below), will automatically start the server. However, if you want to start it separately for development or testing purposes:
+It is important to realize that the directory you are in
+when you run `claude` determines where Claude Code stores
+per-project state (MCP server config, resume history, etc.).
+
+For that reason, we recommend picking a directory
+for starting `claude` and sticking to it.  One good choice
+for such a directory is a specific `acl2` installation,
+for example `~/claude-code/acl2/`.  When we mention
+*your ACL2 directory*, this is the directory we are
+referring to.  (However, if you run `claude` from
+some other directory, use that directory whenever
+we mention *your ACL2 directory*.)
+
+From your ACL2 directory, run:
 
 ```bash
-acl2-mcp
+claude mcp add acl2 /path/to/acl2-mcp/venv/bin/acl2-mcp
 ```
 
-### Configuring acl2-mcp Defaults
+### 3. Install the ACL2 skills
+
+The `for-agents/` directory in the cloned `acl2-mcp` repo ships
+skills that help Claude use ACL2 effectively.
+
+Claude Code looks in `~/.claude/skills/` and in `./.claude/skills/`
+when it starts up.  These instructions presume you
+leave `./.claude/skills/` in *your ACL2 directory*
+free for the skills shipped with this distribution.
+To install these skills, symlink the whole `skills`
+directory as follows.
+
+From your ACL2 directory, run:
+
+```bash
+mkdir .claude
+ln -s /path/to/acl2-mcp/for-agents/.claude/skills .claude/skills
+```
+
+Use the absolute path of your `acl2-mcp` clone in the `ln -s` argument.
+
+With this setup, after a `git pull` in `acl2-mcp`,
+any new skills will be picked up by Claude Code automatically.
+
+For non-Claude agent tools, copy `for-agents/AGENTS.md` to your working
+directory's `AGENTS.md` instead — it contains the same skill content
+inlined, since other agent frameworks don't have a skills mechanism.
+
+That's it — start `claude` from your ACL2 directory and the ACL2 tools
+will be available.
+
+## Configuration
+
+As you use `acl2-mcp`, you may wish to configure the
+server's behavior.  For example, there are parameters controlling
+the visibility of session transcript windows; see
+[Configuring `acl2-mcp` via `config.toml`](#configure-acl2-mcp-via-configtoml) below.
+
+Other topics cover optional and alternate setups: Claude Desktop, choosing
+between project-scoped and user-wide Claude Code installs,
+and running `acl2-mcp` standalone for development.
+
+### Configure `acl2-mcp` via `config.toml`
 
 `acl2-mcp` can load an optional config file from:
 
@@ -89,7 +168,7 @@ Currently supported settings:
 # If true (the default), open a terminal window tailing the session log
 # and bring it to the foreground when a session starts.
 # Set to false to suppress the automatic terminal window.
-view_log_in_terminal = true
+# view_log_in_terminal = true
 
 # If true (the default), close the session log Terminal window when
 # the session ends.  Set to false to keep it open for review.
@@ -113,7 +192,21 @@ If individual settings are unknown or invalid, `acl2-mcp` warns and ignores
 just those settings. Explicit `start_session` arguments override config-file
 defaults.
 
-### Configuring Claude Desktop to use acl2-mcp
+### Configure Claude Code: project vs. user scope
+
+The command in [Installation](#2-register-with-claude-code) registers
+`acl2-mcp` only for the project directory you run it from. To make it
+available in every Claude Code session regardless of directory, use the
+user scope instead:
+
+```bash
+claude mcp add --scope user acl2 /path/to/acl2-mcp/venv/bin/acl2-mcp
+```
+
+Project scope is good for teams with per-project tool configurations;
+user scope is good if you want ACL2 tools everywhere.
+
+### Configure Claude Desktop to use acl2-mcp
 
 Add this to your Claude Desktop configuration file:
 
@@ -135,31 +228,18 @@ We do not know if Claude Desktop works on Linux, so if you have that
 configuration, you will need to find the appropriate json file and update it
 similarly to the macOS example.
 
-### Configuring Claude Code to use acl2-mcp
+### Running the server standalone
 
-Claude Code provides a CLI command to add MCP servers. Choose the configuration that fits your workflow:
+Claude Desktop and Claude Code launch the server automatically once
+configured. To start it by hand for development or testing:
 
-**Project-specific configuration** (recommended for ACL2 development):
-
-From your ACL2 project directory, run:
 ```bash
-claude mcp add acl2 /path/to/acl2-mcp/venv/bin/acl2-mcp
+acl2-mcp
 ```
 
-This makes acl2-mcp available only when working in that specific project directory. Good for teams with per-project tool configurations.
+## Usage
 
-**User-wide configuration** (for system-wide availability):
-
-From any directory, run:
-```bash
-claude mcp add --scope user acl2 /path/to/acl2-mcp/venv/bin/acl2-mcp
-```
-
-This makes acl2-mcp available in all Claude Code sessions regardless of directory. Good if you want ACL2 tools everywhere.
-
-### Example Tool Usage
-
-#### Persistent Session Workflow (Recommended for Interactive Development)
+### Persistent Session Workflow (Recommended for Interactive Development)
 
 For incremental development where you build up definitions and theorems step-by-step, use persistent sessions:
 
@@ -259,7 +339,7 @@ Arguments:
 - ✅ Save/restore checkpoints for experimentation
 - ⚡ Sessions auto-timeout after 30 minutes of inactivity
 
-#### Code-based Tools
+### Code-based Tools
 
 **Prove a Theorem:**
 ```lisp
@@ -284,7 +364,7 @@ Arguments:
   (+ x y))
 ```
 
-#### File-based Tools
+### File-based Tools
 
 **Certify a Book:**
 ```
@@ -321,7 +401,7 @@ Arguments:
   timeout: 60  (optional)
 ```
 
-#### Query and Verification Tools
+### Query and Verification Tools
 
 **Admit an Event:**
 ```

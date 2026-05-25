@@ -1,8 +1,15 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working
+**on `acl2-mcp` itself** (the MCP server source). It describes the
+architecture, build, and test commands for this codebase.
 
-Note, please keep this file in sync with the initial part of `AGENTS.md`.  The latter file can be used by tools other than Claude Code.
+If you are an end user *using* `acl2-mcp` to drive ACL2 from Claude — not
+modifying the server — see the installation section of `README.md`; the
+skills you'll install live under `for-agents/.claude/skills/`.
+
+Please keep this file in sync with `AGENTS.md`, which provides the same
+content for non-Claude agent tools.
 
 ## Project Overview
 

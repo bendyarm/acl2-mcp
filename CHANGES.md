@@ -1,3 +1,15 @@
+# Changes — 2026-05-24
+
+- Improved the organization of the README.md installation instructions,
+  and add instructions on how to instruct Claude Code and other
+  agents to find skill information.
+
+- Split agent-facing documentation by audience.  The repo-root
+  `CLAUDE.md` and `AGENTS.md` are now strictly dev-facing (architecture,
+  build, tests for contributors to `acl2-mcp` itself).  End-user
+  guidance for driving ACL2 via `acl2-mcp` moved to a new `for-agents/`
+  directory.
+
 # Changes — 2026-04-05
 
 ## Summary
