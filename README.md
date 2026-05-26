@@ -98,10 +98,10 @@ For that reason, we recommend picking a directory
 for starting `claude` and sticking to it.  One good choice
 for such a directory is a specific `acl2` installation,
 for example `~/claude-code/acl2/`.  When we mention
-*your ACL2 directory*, this is the directory we are
+"your ACL2 directory", this is the directory we are
 referring to.  (However, if you run `claude` from
-some other directory, use that directory whenever
-we mention *your ACL2 directory*.)
+some other directory, use that directory when
+we say to use "your ACL2 directory".)
 
 From your ACL2 directory, run:
 
