@@ -35,6 +35,43 @@ def test_load_config_valid_file_overrides_defaults(tmp_path: Path) -> None:
     assert config.session_log.view_log_in_terminal is False
 
 
+def test_load_config_viewer_defaults_to_auto() -> None:
+    """The viewer backend defaults to 'auto'."""
+    assert ServerConfig().session_log.viewer == "auto"
+
+
+def test_load_config_valid_viewer_overrides_default(tmp_path: Path) -> None:
+    """A recognized viewer backend should override the default."""
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "[session_log]\n"
+        'viewer = "emacs"\n',
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path, stderr=StringIO())
+
+    assert config.session_log.viewer == "emacs"
+
+
+def test_load_config_invalid_viewer_falls_back_with_warning(tmp_path: Path) -> None:
+    """An unrecognized viewer value should warn and fall back to the default."""
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "[session_log]\n"
+        'viewer = "nope"\n'
+        "view_log_in_terminal = false\n",
+        encoding="utf-8",
+    )
+    warning_output = StringIO()
+
+    config = load_config(config_path, stderr=warning_output)
+
+    assert config.session_log.viewer == "auto"               # fell back to default
+    assert config.session_log.view_log_in_terminal is False  # other settings kept
+    assert "session_log.viewer" in warning_output.getvalue()
+
+
 def test_load_config_warns_per_invalid_setting_and_keeps_valid_ones(tmp_path: Path) -> None:
     """Unknown and invalid settings should be ignored individually."""
     config_path = tmp_path / "config.toml"
