@@ -203,11 +203,12 @@ for another kind of terminal.
 
 ### 6. Set up a function on your local machine
 
-When you start a terminal and run this example function,
-it will connect to HOST and start tmux with emacs
+When you start a terminal and run this example function on your
+local machine, it will connect to HOST and start tmux with emacs
 in a left pane and a shell for claude code on the right.
 
-If you use zsh on macOS, add the following to your `~/.zshrc`:
+For example, if you are typing at a Mac and if you use zsh,
+add the following to your Mac's `~/.zshrc`:
 
 ```bash
 HOST() {
@@ -283,14 +284,30 @@ Verify inside a pane: `which acl2 emacsclient`.
 
 ## Appendix D. Troubleshooting
 
-This stack fails silently (no `DISPLAY`; acl2-mcp swallows viewer errors), so
-bisect:
+This interface stack depends on a number of pieces: your MCP client, acl2-mcp,
+emacsclient, the Emacs server, tmux, and ssh/mosh/... — and a failure in any of
+them can be silent. So work through these in order:
 
-- **Nothing appears.** Re-run the Step 3 parse check (`viewer='emacs'`), and
-  **restart Claude Code** after any config or code change.
+- **You started a session but no log panel appeared in Emacs.** Check the config
+  is active — re-run the Step 3 parse check, which should print `viewer='emacs'`.
+  If you created or edited `config.toml` (or the code) after Claude Code was
+  already running, **restart Claude Code**; acl2-mcp reads the config only at
+  launch. If the config is right, continue to the next bullet.
 - **Is the Emacs side OK?** `emacsclient --eval '(acl2-mcp-show-log "/tmp/x.log")'`
   (no `-n`, so errors show). `void-function …` → re-eval/restart Emacs; can't
   connect → `(server-start)` isn't running.
 - **`acl2`/`emacsclient` not found** → PATH issue (Appendix C).
 - **Old build deployed** → `grep -n _emacsclient_eval acl2_mcp/server.py` should
   match.
+- **`tmux` won't start — `open terminal failed: terminal does not support
+  clear`.** `$TERM` is unset or names a terminfo entry the server lacks. Since
+  `TERM` only *claims* capabilities, the fix depends on the cause. If the
+  terminal is genuinely capable but mislabeled — e.g. your emulator's `$TERM`
+  (which ssh forwards to the server) isn't in the server's terminfo, or `$TERM`
+  is unset — then you can set a universal value before starting tmux:
+  `export TERM=xterm-256color` (or install the missing terminfo). If the
+  frontend genuinely isn't a full terminal — a real dumb terminal, a pipe, or
+  Emacs's `M-x shell` (`TERM=dumb` by design) — faking `TERM` only makes tmux
+  launch and render garbage; use a real terminal instead. Also: don't nest tmux
+  inside `screen`; tmux replaces it.
+
