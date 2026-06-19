@@ -25,7 +25,8 @@ designed to work with any agent/framework supporting MCP.
 | ACL2 on PATH | `which acl2` |
 | Your MCP client agent | `command -v claude` |
 
-Debian/Ubuntu `venv` support is not usually installed by default.  To install:
+Debian/Ubuntu `venv` support is not usually installed by default.  If the check
+above gets an error, you can install it with:
 ```bash
 sudo apt install python3-venv
 ```
@@ -88,6 +89,8 @@ cd ~/claude-code/acl2-mcp
 venv/bin/python -c "from acl2_mcp.config import load_config; print(load_config().session_log)"
 ```
 
+If things are set up right you should see `viewer='emacs'` in the output.
+
 ### 4. Set up Emacs
 
 In `~/.emacs`, add the following:
@@ -148,7 +151,8 @@ Kill its `tail' process and buffer, and remove its window if shown."
       (kill-buffer buf))))
 ```
 
-Restart Emacs (or eval the new forms), then sanity-check the Emacs side alone:
+Restart Emacs (or eval the new forms), then start a new shell to
+the remote machine and run the following:
 
 ```bash
 echo test > /tmp/x.log
