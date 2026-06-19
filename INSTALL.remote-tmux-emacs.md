@@ -89,7 +89,7 @@ cd ~/claude-code/acl2-mcp
 venv/bin/python -c "from acl2_mcp.config import load_config; print(load_config().session_log)"
 ```
 
-If things are set up right you should see `viewer='emacs'` in the output.
+If things are set up right, you should see `viewer='emacs'` in the output.
 
 ### 4. Set up Emacs
 
@@ -131,8 +131,15 @@ In `~/.emacs`, add the following:
 		     (insert chunk))
 		   (dolist (win (get-buffer-window-list b nil t))
 		     (set-window-point win (point-max))))))))))) ; follow the end
-    (let ((win (display-buffer buf '((display-buffer-in-side-window)
-				     (side . right) (window-width . 0.5)))))
+    (let ((win (display-buffer buf
+                 ;; If you have enough horizontal space, this keeps the
+                 ;; session log pinned in the right half of Emacs:
+                 '((display-buffer-in-side-window) (side . right) (window-width . 0.5))
+                 ;; Alternatively, if you want it to be easier to move the
+                 ;; session log Emacs window around, then comment out the
+                 ;; previous form and uncomment this line:
+                 ;'((display-buffer-in-direction) (direction . right) (window-width . 0.5))
+                 )))
       (when win (set-window-point win (point-max))))
     buf))
 
@@ -151,15 +158,16 @@ Kill its `tail' process and buffer, and remove its window if shown."
       (kill-buffer buf))))
 ```
 
-Restart Emacs (or eval the new forms), then start a new shell to
-the remote machine and run the following:
+Restart Emacs (or eval the new forms), then open a shell on the server
+and run the following:
 
 ```bash
 echo test > /tmp/x.log
 emacsclient --eval '(acl2-mcp-show-log "/tmp/x.log")'
 ```
 
-A read-only window tailing the file should appear on the right.
+A read-only window tailing the file should appear on the right
+of the Emacs window.
 
 ### 5. Set up tmux
 
@@ -170,7 +178,7 @@ from a Mac.
 - `C-\` is the "tmux prefix" key (default is `C-b`, which is not good
   for Emacs users). See the tmux docs for commands.
 
-- `M-o` switches between the Emacs and Claude Code CLI panes.  
+- `M-o` switches between the Emacs and Claude Code CLI panes.
 
 - `M-i`: If you want to scroll the Claude Code CLI pane, switch to it
    and do `M-i`; then you can scroll it with a mouse scroll wheel
@@ -209,9 +217,9 @@ for another kind of terminal.
 
 When you start a terminal and run this example function on your
 local machine, it will connect to HOST and start tmux with emacs
-in a left pane and a shell for claude code on the right.
+in a left pane and a shell for Claude Code CLI on the right.
 
-For example, if you are typing at a Mac and if you use zsh,
+For example, if you are typing at a Mac using zsh,
 add the following to your Mac's `~/.zshrc`:
 
 ```bash
@@ -230,11 +238,16 @@ HOST() {
 
 Replace the instances of `HOST` by the remote server name.
 
+Note, if your terminal has limited horizontal space, you may
+want to change the `33%` to `50%`; see also the alternative `display-buffer`
+forms in step 4.
+
+
 ## End-to-end walkthrough
 
 With everything above in place, a working session looks like this:
 
-1. On your local machine, run your launcher from Step 6. 
+1. On your local machine, run your launcher from Step 6.
    It ssh's in and lands you in tmux: Emacs (`-nw`) on the left, a
    shell on the right.  Use `M-o` to switch between panes.
 2. In the right pane, `cd` to your ACL2 directory (`~/claude-code/acl2`) and run
@@ -245,7 +258,15 @@ With everything above in place, a working session looks like this:
    pane, and tails a session log capturing ACL2's I/O, live while Claude works.
 5. If you need to scroll up in the Claude pane, `M-i`, then the scroll wheel
    or arrow keys scroll back. `q` exits.
-6. When the session ends, the log panel in Emacs closes.
+6. Since this is in tmux on a server, you can disconnect and reconnect later.
+   To disconnect, do `C-\ d`.  To reconnect from your local machine, simply
+   call the HOST function defined in step 6.  It will see there is already
+   a `main` tmux session and will connect to it.
+7. If you want to kill the tmux session (including everything in it),
+   you might want to save your Emacs buffers and `/exit` from Claude Code.
+   If you exit all the panes, the tmux session will exit, but the most
+   direct way to kill the session is `C-\ :` followed by `kill-session`.
+   When the session ends, the Emacs and shell panes are killed.
 
 ## Appendix A. How it works
 
