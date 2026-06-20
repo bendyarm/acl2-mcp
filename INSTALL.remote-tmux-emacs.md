@@ -106,6 +106,9 @@ In `~/.emacs`, add the following:
 
 ;; 1. Emacs server, so acl2-mcp's emacsclient can reach this Emacs.
 (require 'server)
+(let ((sock (getenv "EMACS_SOCKET_NAME")))
+  (when (and sock (> (length sock) 0))
+    (setq server-name sock)))
 (unless (server-running-p)
   (server-start))
 
@@ -227,7 +230,7 @@ HOST() {
   local sess=${1:-main}
   ssh -t HOST "
     tmux has-session -t $sess 2>/dev/null || {
-      tmux new-session -d -x $(tput cols) -y $(tput lines) -s $sess
+      tmux new-session -d -e EMACS_SOCKET_NAME=$sess -x $(tput cols) -y $(tput lines) -s $sess
       tmux split-window -h -l 33% -t $sess
       tmux send-keys -t ${sess}.0 'exec emacs -nw' Enter
     }
@@ -335,4 +338,11 @@ them can be silent. So work through these in order:
   Emacs's `M-x shell` (`TERM=dumb` by design) — faking `TERM` only makes tmux
   launch and render garbage; use a real terminal instead. Also: don't nest tmux
   inside `screen`; tmux replaces it.
+- **You need to copy text with the mouse, but the selection isn't
+  tmux-pane-aware** (it spans both side-by-side panes, so dragging in one grabs
+  text from the other on the same rows). Press `C-\ z` to zoom the current pane
+  to fill the whole window — with a single full-width pane, the native selection
+  is clean. Copy your text, then `C-\ z` again to toggle back. Zoom is a display
+  toggle, so it restores your split exactly — whatever the proportions — with no
+  sizes to remember.
 
