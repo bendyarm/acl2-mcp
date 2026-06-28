@@ -1035,15 +1035,50 @@ def _session_window_title(session_id: str) -> str:
     return f"ACL2 Log {short_id}"
 
 
-def open_log_viewer(log_file: Path, lines: int = 50, session_id: str = "") -> None:
+def _elisp_escape(value: str) -> str:
+    """Escape a string for inclusion in an Emacs Lisp double-quoted literal."""
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _emacsclient_eval(form: str) -> None:
+    """Best-effort: evaluate an Emacs Lisp FORM in the running Emacs via emacsclient.
+
+    Like the other viewers, this fails silently if emacsclient or the Emacs
+    server is unavailable.
     """
-    Open a terminal window showing tail -f of the log file and bring it to the foreground.
+    try:
+        subprocess.Popen(
+            ["emacsclient", "-n", "--eval", form],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+
+def open_log_viewer(
+    log_file: Path, lines: int = 50, session_id: str = "", viewer: str = "auto"
+) -> None:
+    """
+    Open a viewer tailing the log file and bring it to the foreground.
+
+    The viewer backend is selected by ``viewer``:
+      - "emacs": tail the log in Emacs via emacsclient (acl2-mcp-show-log)
+      - "none": do nothing
+      - "auto"/"terminal": open a terminal window (platform-specific)
 
     Args:
         log_file: Path to the log file to view
         lines: Number of lines to show initially (default: 50)
         session_id: Session ID, used to set a unique window title
+        viewer: Viewer backend ("auto", "emacs", "terminal", or "none")
     """
+    if viewer == "none":
+        return
+    if viewer == "emacs":
+        _emacsclient_eval(f'(acl2-mcp-show-log "{_elisp_escape(str(log_file))}")')
+        return
+
     system = platform.system()
 
     try:
@@ -1084,18 +1119,28 @@ def open_log_viewer(log_file: Path, lines: int = 50, session_id: str = "") -> No
         pass
 
 
-def show_session_log(log_file: Path, lines: int = 50, session_id: str = "") -> None:
+def show_session_log(
+    log_file: Path, lines: int = 50, session_id: str = "", viewer: str = "auto"
+) -> None:
     """
-    Show the session log in a terminal window and bring it to the foreground.
+    Show the session log in a viewer and bring it to the foreground.
 
     If a Terminal window for this session is already open, activate it.
-    Otherwise, open a new Terminal window tailing the log file.
+    Otherwise, open a new viewer tailing the log file.
 
     Args:
         log_file: Path to the log file to view
         lines: Number of lines to show initially if opening a new window (default: 50)
         session_id: Session ID, used to find or create the correct window
+        viewer: Viewer backend ("auto", "emacs", "terminal", or "none")
     """
+    if viewer == "none":
+        return
+    if viewer == "emacs":
+        # Re-displaying is idempotent: acl2-mcp-show-log reuses the buffer.
+        _emacsclient_eval(f'(acl2-mcp-show-log "{_elisp_escape(str(log_file))}")')
+        return
+
     system = platform.system()
 
     try:
@@ -1134,14 +1179,22 @@ def show_session_log(log_file: Path, lines: int = 50, session_id: str = "") -> N
         pass
 
 
-def close_log_viewer(session_id: str, log_file: Path | None = None) -> None:
-    """Close the Terminal window for a session's log viewer.
+def close_log_viewer(
+    session_id: str, log_file: Path | None = None, viewer: str = "auto"
+) -> None:
+    """Close the viewer for a session's log.
 
-    Kills the tail process following the log file (so Terminal won't
-    show a "terminate running processes?" dialog), then closes the
-    window by its custom title.  Silently does nothing if the window
-    or process doesn't exist.
+    For the "emacs" backend, kills the tail buffer/process and removes its
+    window via acl2-mcp-close-log.  For the terminal backend, kills the tail
+    process following the log file (so Terminal won't show a "terminate
+    running processes?" dialog), then closes the window by its custom title.
+    Silently does nothing if the window or process doesn't exist.
     """
+    if viewer == "emacs":
+        if log_file:
+            _emacsclient_eval(f'(acl2-mcp-close-log "{_elisp_escape(str(log_file))}")')
+        return
+
     system = platform.system()
 
     try:
@@ -1355,7 +1408,10 @@ class SessionManager:
 
             # Open log viewer if requested
             if effective_view_log_in_terminal and log_file:
-                open_log_viewer(log_file, log_tail_lines, session_id)
+                open_log_viewer(
+                    log_file, log_tail_lines, session_id,
+                    viewer=self.config.session_log.viewer,
+                )
 
             self.sessions[session_id] = session
 
@@ -1401,9 +1457,12 @@ class SessionManager:
         await session.terminate()
         del self.sessions[session_id]
 
-        # Close the log viewer Terminal window if configured
+        # Close the log viewer if configured
         if self.config.session_log.close_log_on_end:
-            close_log_viewer(session_id, session.log_file)
+            close_log_viewer(
+                session_id, session.log_file,
+                viewer=self.config.session_log.viewer,
+            )
 
         return f"Session {session_id} ended successfully"
 
@@ -2270,11 +2329,14 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
                     text=f"Error: Session {session_id} does not have logging enabled",
                 )
             ]
-        show_session_log(session.log_file, log_tail_lines, session_id)
+        show_session_log(
+            session.log_file, log_tail_lines, session_id,
+            viewer=session_manager.config.session_log.viewer,
+        )
         return [
             TextContent(
                 type="text",
-                text=f"Opened session log in Terminal: {session.log_file}",
+                text=f"Opened session log: {session.log_file}",
             )
         ]
 
