@@ -35,29 +35,22 @@ Example:
         "deny": [
 
             "Edit(//Library/**)",
-            "Write(//Library/**)",
 
             "Edit(//System/**)",
-            "Write(//System/**)",
 
             "Edit(//usr/**)",
-            "Write(//usr/**)",
 
             "Read(~/.ssh/**)",
             "Edit(~/.ssh/**)",
-            "Write(~/.ssh/**)",
 
             "Read(~/Library/**)",
             "Edit(~/Library/**)",
-            "Write(~/Library/**)",
 
             "Read(~/Pictures/**)",
             "Edit(~/Pictures/**)",
-            "Write(~/Pictures/**)",
 
             "Read(~/Work/funding/**)",
             "Edit(~/Work/funding/**)",
-            "Write(~/Work/funding/**)",
 
             ...
 
@@ -71,7 +64,11 @@ It wants a double slash for the root. The above prevents access to some root-lev
 
 macOS may enforce additional restrictions, e.g. about creating a new directory under `/`, which would likely require `sudo`.
 
-Other than explicit deny/ask/allow permissions, Claude Code should be able to read anything not denied (although it probably wouldn't do that) and to edit/write anything in the working directory (i.e. the one in which Claude Code is started). Actually, the latter needs the following:
+Denying the `Edit` permission subsumes the `Write` permission; the latter is only useful if used with no arguments.
+
+Denying the `Read` permission does not fully subsume the `Edit` permission; it only covers the `Edit` tool and the `Write` tool, but not the `NotebookEdit` tool. (Note the difference between 'tool' and 'permission'.)
+
+Other than explicit deny/ask/allow permissions, Claude Code should be able to read anything not denied (although it probably wouldn't do that) and to write anything in the working directory (i.e. the one in which Claude Code is started). Actually, the latter needs the following:
 ```
     "permissions": {
 
@@ -84,7 +81,7 @@ Other than explicit deny/ask/allow permissions, Claude Code should be able to re
 
 ### Commands
 
-Besides 'read', 'edit', and 'write' permissions on directories, there are other kinds on permissions, e.g. on shell commands, to deny/ask/allow certain patterns of commands.
+Besides the above permissions on directories, there are other kinds on permissions, e.g. on shell commands, to deny/ask/allow certain patterns of commands.
 
 Example:
 ```
