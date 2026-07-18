@@ -63,6 +63,10 @@ The steps below get you a working default setup with Claude Code.
 For Claude Desktop or other configuration scopes, see
 [Configuration](#configuration).
 
+For a **remote, headless Linux server** (ssh/mosh + tmux + Emacs, no graphical
+display), see [INSTALL.remote-tmux-emacs.md](INSTALL.remote-tmux-emacs.md): it sets
+up the session log to tail live inside Emacs instead of a terminal window.
+
 ### 1. Install the package
 
 Clone the repository, then `cd` into it:
@@ -173,6 +177,15 @@ Currently supported settings:
 # If true (the default), close the session log Terminal window when
 # the session ends.  Set to false to keep it open for review.
 # close_log_on_end = true
+
+# Which viewer opens the session log when a session starts:
+#   "auto"     - default; a terminal window (platform-specific)
+#   "emacs"    - tail the log inside a running Emacs via emacsclient, for
+#                remote/headless servers (see INSTALL.remote-tmux-emacs.md)
+#   "terminal" - force the terminal-window viewer
+#   "none"     - do not open any viewer
+# (view_log_in_terminal above is the on/off gate; viewer chooses the backend.)
+# viewer = "auto"
 
 [tool_output]
 # Maximum characters returned by a tool call before output is elided.

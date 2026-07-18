@@ -20,6 +20,7 @@ class SessionLogConfig:
 
     view_log_in_terminal: bool = True
     close_log_on_end: bool = True
+    viewer: str = "auto"
 
 
 @dataclass(frozen=True)
@@ -129,9 +130,18 @@ def _merge_config(
                     config_path,
                     warning_stream,
                 ),
+                viewer=_read_choice_setting(
+                    raw_session_log,
+                    "session_log",
+                    "viewer",
+                    session_log.viewer,
+                    ("auto", "emacs", "terminal", "none"),
+                    config_path,
+                    warning_stream,
+                ),
             )
             for key in raw_session_log:
-                if key not in {"view_log_in_terminal", "close_log_on_end"}:
+                if key not in {"view_log_in_terminal", "close_log_on_end", "viewer"}:
                     _warn(
                         warning_stream,
                         f"ignoring unknown config key 'session_log.{key}' in {config_path}.",
@@ -233,6 +243,30 @@ def _read_int_setting(
         warning_stream,
         f"ignoring invalid value for '{section_name}.{key}' in {config_path}: "
         "expected integer.",
+    )
+    return default
+
+
+def _read_choice_setting(
+    table: dict[str, Any],
+    section_name: str,
+    key: str,
+    default: str,
+    choices: tuple[str, ...],
+    config_path: Path,
+    warning_stream: TextIO,
+) -> str:
+    if key not in table:
+        return default
+
+    value = table[key]
+    if isinstance(value, str) and value in choices:
+        return value
+
+    _warn(
+        warning_stream,
+        f"ignoring invalid value for '{section_name}.{key}' in {config_path}: "
+        f"expected one of {', '.join(choices)}.",
     )
     return default
 
