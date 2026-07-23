@@ -14,9 +14,9 @@ from acl2_mcp.server import (
 )
 
 
-def test_validate_timeout_clamps_max() -> None:
-    """Test that timeout is clamped to maximum."""
-    assert validate_timeout(1000) == 300
+def test_validate_timeout_honors_large_values() -> None:
+    """Test that large explicit timeouts are honored, not clamped."""
+    assert validate_timeout(1000) == 1000
 
 
 def test_validate_timeout_clamps_min() -> None:
@@ -31,8 +31,8 @@ def test_validate_timeout_handles_float() -> None:
 
 
 def test_validate_timeout_handles_invalid_type() -> None:
-    """Test that invalid types return default."""
-    assert validate_timeout("invalid") == 30  # type: ignore
+    """Test that invalid types fall back to no timeout."""
+    assert validate_timeout("invalid") is None  # type: ignore
 
 
 def test_validate_acl2_identifier_rejects_quotes() -> None:

@@ -29,7 +29,6 @@ from acl2_mcp.config import ServerConfig, ToolOutputConfig, load_config
 
 
 # Security constants
-MAX_TIMEOUT = 300  # 5 minutes maximum
 MIN_TIMEOUT = 1
 MAX_CODE_LENGTH = 1_000_000  # 1MB of code
 SESSION_INACTIVITY_TIMEOUT = None  # Disabled by default - sessions don't auto-timeout
@@ -133,7 +132,10 @@ def matches_prompt_pattern(text: str) -> bool:
 
 def validate_timeout(timeout: int | None) -> int | None:
     """
-    Validate and clamp timeout value.
+    Validate timeout value.
+
+    Explicit timeouts are honored as given (no upper cap — omitting the
+    timeout already means unlimited), subject to a floor of MIN_TIMEOUT.
 
     Args:
         timeout: Requested timeout in seconds, or None for no timeout
@@ -145,7 +147,7 @@ def validate_timeout(timeout: int | None) -> int | None:
         return None
     if not isinstance(timeout, (int, float)):
         return None
-    return max(MIN_TIMEOUT, min(int(timeout), MAX_TIMEOUT))
+    return max(MIN_TIMEOUT, int(timeout))
 
 
 def detect_optimal_jobs() -> tuple[int | None, str]:

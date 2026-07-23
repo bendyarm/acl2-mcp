@@ -35,9 +35,10 @@ The ACL2 MCP server executes arbitrary ACL2 code provided by the client. This is
 - Prevents code injection through function/theorem names
 
 **Timeout Values** (`validate_timeout`):
-- Clamps to range: 1-300 seconds
-- Prevents negative or extreme values
-- Handles invalid types gracefully
+- Enforces a minimum of 1 second; explicit timeouts are otherwise
+  honored as given (omitting the timeout means no timeout)
+- Prevents negative or zero values
+- Handles invalid types gracefully (treated as no timeout)
 
 **Code Length**:
 - Maximum 1MB of code per request (both one-off and session modes)

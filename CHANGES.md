@@ -1,3 +1,11 @@
+# Changes — 2026-07-23
+
+- Removed the hard-coded 300-second timeout cap.  Explicit timeouts
+  passed to tools were silently clamped to 5 minutes, which is shorter
+  than many real proofs and book certifications — and shorter than the
+  unlimited default you get by omitting the timeout entirely.  Explicit
+  timeouts are now honored as given (minimum 1 second still enforced).
+
 # Changes — 2026-05-24
 
 - Improved the organization of the README.md installation instructions,
