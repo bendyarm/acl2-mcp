@@ -1252,6 +1252,33 @@ class SessionManager:
         self.sessions: dict[str, ACL2Session] = {}
         self._cleanup_task: Optional[asyncio.Task[None]] = None
 
+    async def _report_startup_failure(self, session: ACL2Session) -> str:
+        """
+        Clean up a session whose ACL2 process died during startup and build
+        an error message from its exit code and captured output.
+
+        The session has not been registered in self.sessions yet.
+        """
+        process = session.process
+        try:
+            exit_code: int | None = await asyncio.wait_for(process.wait(), timeout=2.0)
+        except Exception:
+            exit_code = process.returncode
+        # Give the PTY reader a moment to drain any final output, then
+        # capture it before terminate() clears the ring buffer.
+        await asyncio.sleep(0.3)
+        output = bytes(session.ring_buffer).decode(errors="replace").strip()
+        await session.terminate()
+
+        message = "Error: ACL2 process exited during session startup"
+        if exit_code is not None:
+            message += f" (exit code {exit_code})"
+        if output:
+            message += f"\nOutput:\n{output[-2000:]}"
+        else:
+            message += "; no output was produced"
+        return message
+
     async def start_session(
         self,
         name: Optional[str] = None,
@@ -1340,15 +1367,26 @@ class SessionManager:
 
             # Spawn ACL2 process with slave as stdin/stdout/stderr
             # Note: We call 'acl2' directly, no wrapper script needed
-            process = await asyncio.create_subprocess_exec(
-                "acl2",
-                stdin=slave_fd,
-                stdout=slave_fd,
-                stderr=slave_fd,
-                cwd=cwd,
-                env=env,
-                preexec_fn=setup_controlling_tty,  # Critical for proper terminal setup
-            )
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    "acl2",
+                    stdin=slave_fd,
+                    stdout=slave_fd,
+                    stderr=slave_fd,
+                    cwd=cwd,
+                    env=env,
+                    preexec_fn=setup_controlling_tty,  # Critical for proper terminal setup
+                )
+            except FileNotFoundError as e:
+                os.close(master_fd)
+                os.close(slave_fd)
+                if cwd is not None and e.filename == cwd:
+                    return "", f"Error: Working directory not found: {cwd}"
+                return "", "Error: The 'acl2' executable was not found on PATH"
+            except PermissionError:
+                os.close(master_fd)
+                os.close(slave_fd)
+                return "", "Error: The 'acl2' executable exists but is not executable (permission denied)"
 
             # Close slave_fd in parent process (child inherited it)
             os.close(slave_fd)
@@ -1404,6 +1442,10 @@ class SessionManager:
                         break
                 if startup_complete:
                     break
+                # If the ACL2 process died during startup, report why
+                # instead of registering a dead session.
+                if process.returncode is not None or session.shutdown_event.is_set():
+                    return "", await self._report_startup_failure(session)
                 await asyncio.sleep(0.1)  # Check every 100ms
 
             # Open log viewer if requested
@@ -1424,8 +1466,10 @@ class SessionManager:
                 message += f"\nLog file: {session.log_file}"
             return session_id, message
 
-        except Exception:
-            # SECURITY: Don't leak internal error details
+        except Exception as e:
+            # SECURITY: Don't leak internal error details to the client,
+            # but record them in the debug log for diagnosis.
+            _debug_log(f"start_session failed: {e!r}")
             return "", "Error: Failed to start session"
 
     async def end_session(self, session_id: str) -> str:

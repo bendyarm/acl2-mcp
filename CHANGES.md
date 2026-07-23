@@ -1,3 +1,15 @@
+# Changes — 2026-07-23
+
+- ACL2 startup failures are no longer silent.  Previously, if the ACL2
+  process died during session startup (e.g., a broken wrapper script or
+  missing saved image), `start_session` still reported success after a
+  10-second wait, and the problem only surfaced as confusing errors on
+  later commands.  Now the death is detected immediately and reported
+  with the process's exit code and captured output.  A missing or
+  non-executable `acl2` binary likewise gets a specific error message
+  instead of the generic "Failed to start session", and unexpected
+  startup exceptions are recorded in the debug log.
+
 # Changes — 2026-05-24
 
 - Improved the organization of the README.md installation instructions,
