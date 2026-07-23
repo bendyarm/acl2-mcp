@@ -889,57 +889,71 @@ class ACL2Session:
 
     async def _logger_task(self) -> None:
         """
-        Background task that reads from merge queue and writes to log file.
-        Maintains timestamp ordering and updates output_buffer for send_command.
+        Background task that reads from the merge queue, appends lines to
+        output_buffer, and writes them to the log file when logging is
+        enabled.
+
+        This task must run even when logging is disabled: startup prompt
+        detection and output collection in send_command both read from
+        output_buffer, and the merge queue would grow without bound if
+        nothing drained it.
         """
+        log_handle = None
         try:
-            if not self.log_file:
-                return
+            if self.log_file:
+                # Open log file with aiofiles for non-blocking async I/O
+                log_handle = await aiofiles.open(self.log_file, "a", buffering=1)
 
-            # Open log file with aiofiles for non-blocking async I/O
-            async with aiofiles.open(self.log_file, "a", buffering=1) as log_handle:
-                while not self.shutdown_event.is_set():
-                    try:
-                        # Get next line from merge queue with timeout
-                        timestamp, seq_id, stream_type, line = await asyncio.wait_for(
-                            self.merge_queue.get(),
-                            timeout=1.0  # Check shutdown event periodically
-                        )
+            while not self.shutdown_event.is_set():
+                try:
+                    # Get next line from merge queue with timeout
+                    timestamp, seq_id, stream_type, line = await asyncio.wait_for(
+                        self.merge_queue.get(),
+                        timeout=1.0  # Check shutdown event periodically
+                    )
 
-                        # Write to log file
+                    # Write to log file
+                    if log_handle is not None:
                         await log_handle.write(line)
                         await log_handle.flush()
 
-                        # Also store in output_buffer for send_command to collect output
-                        self.output_buffer.append((seq_id, line))
+                    # Also store in output_buffer for send_command to collect output
+                    self.output_buffer.append((seq_id, line))
 
-                        # Check if buffer is getting too large (keep last 50000 lines)
-                        if len(self.output_buffer) > 50000:
-                            self.output_buffer = self.output_buffer[-50000:]
-                            print(f"Warning: Output buffer trimmed for session {self.session_id}", file=sys.stderr)
+                    # Check if buffer is getting too large (keep last 50000 lines)
+                    if len(self.output_buffer) > 50000:
+                        self.output_buffer = self.output_buffer[-50000:]
+                        print(f"Warning: Output buffer trimmed for session {self.session_id}", file=sys.stderr)
 
-                    except asyncio.TimeoutError:
-                        # No data in queue, continue checking shutdown
-                        continue
-                    except Exception as e:
-                        print(f"Error in logger task: {e}", file=sys.stderr)
-                        break
+                except asyncio.TimeoutError:
+                    # No data in queue, continue checking shutdown
+                    continue
+                except Exception as e:
+                    print(f"Error in logger task: {e}", file=sys.stderr)
+                    break
 
-                # Drain remaining items in queue before shutting down
-                while not self.merge_queue.empty():
-                    try:
-                        timestamp, seq_id, stream_type, line = self.merge_queue.get_nowait()
+            # Drain remaining items in queue before shutting down
+            while not self.merge_queue.empty():
+                try:
+                    timestamp, seq_id, stream_type, line = self.merge_queue.get_nowait()
+                    if log_handle is not None:
                         await log_handle.write(line)
                         await log_handle.flush()
-                        self.output_buffer.append((seq_id, line))
-                    except asyncio.QueueEmpty:
-                        break
-                    except Exception as e:
-                        print(f"Error draining queue: {e}", file=sys.stderr)
-                        break
+                    self.output_buffer.append((seq_id, line))
+                except asyncio.QueueEmpty:
+                    break
+                except Exception as e:
+                    print(f"Error draining queue: {e}", file=sys.stderr)
+                    break
 
         except Exception as e:
             print(f"Fatal error in logger task: {e}", file=sys.stderr)
+        finally:
+            if log_handle is not None:
+                try:
+                    await log_handle.close()
+                except Exception as e:
+                    print(f"Error closing log file: {e}", file=sys.stderr)
 
     async def terminate(self) -> None:
         """

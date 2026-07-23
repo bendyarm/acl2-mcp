@@ -22,6 +22,7 @@ cleanup issue, not a production concern.
 
 import asyncio
 import os
+import time
 from typing import Any
 
 import pytest
@@ -122,6 +123,38 @@ async def test_start_session_binary_dies_immediately(tmp_path: Any, monkeypatch:
     assert "fatal: could not load image" in text
     # The dead session must not be registered
     assert set(session_manager.sessions) == sessions_before
+
+
+@pytest.mark.asyncio
+async def test_start_session_without_logging() -> None:
+    """Sessions with logging disabled should start promptly and return
+    command output.
+
+    Previously output_buffer was only populated by the logging task, so
+    with enable_logging=False startup prompt detection always burned the
+    full 10-second wait and every command returned empty output.
+    """
+    start = time.monotonic()
+    result = await call_tool("start_session", {
+        "enable_logging": False,
+        "view_log_in_terminal": False,
+    })
+    elapsed = time.monotonic() - start
+
+    assert len(result) == 1
+    assert "Session started successfully" in result[0].text
+    assert "Log file" not in result[0].text
+    assert elapsed < 8.0, f"startup took {elapsed:.1f}s (10-second-wait bug?)"
+
+    session_id = extract_session_id(result[0].text)
+    try:
+        eval_result = await call_tool("evaluate", {
+            "code": "(+ 1 2)",
+            "session_id": session_id,
+        })
+        assert "3" in eval_result[0].text
+    finally:
+        await call_tool("end_session", {"session_id": session_id})
 
 
 @pytest.mark.asyncio
