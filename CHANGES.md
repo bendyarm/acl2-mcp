@@ -4,7 +4,11 @@
   passed to tools were silently clamped to 5 minutes, which is shorter
   than many real proofs and book certifications — and shorter than the
   unlimited default you get by omitting the timeout entirely.  Explicit
-  timeouts are now honored as given (minimum 1 second still enforced).
+  timeouts are now honored as given, clamped to the range 1 second to
+  2^31-1 seconds (~68 years — the ceiling exists only to keep the
+  arithmetic safe).  NaN and infinite timeout values are rejected with
+  a clear error; previously they crashed timeout validation with an
+  unhandled exception.
 
 # Changes — 2026-05-24
 

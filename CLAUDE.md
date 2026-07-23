@@ -54,7 +54,7 @@ Sessions use prompt detection to identify command completion:
 ### Security Features
 
 Security validation (see `SECURITY.md`):
-- Input validation: code length (1MB max), timeout (min 1s, no upper cap), file paths, identifiers
+- Input validation: code length (1MB max), timeout (1s to 2^31-1s), file paths, identifiers
 - Path traversal prevention: all paths resolved to absolute
 - Command injection prevention: ACL2 strings escaped, identifiers validated
 - DoS prevention: session limits, timeout enforcement, checkpoint limits

@@ -4,6 +4,7 @@ import aiofiles
 import asyncio
 import errno
 import fcntl
+import math
 import os
 import platform
 import pty
@@ -30,6 +31,9 @@ from acl2_mcp.config import ServerConfig, ToolOutputConfig, load_config
 
 # Security constants
 MIN_TIMEOUT = 1
+# ~68 years — far beyond any realistic use.  The ceiling keeps validated
+# timeouts small enough that downstream float arithmetic cannot overflow.
+MAX_TIMEOUT = 2**31 - 1
 MAX_CODE_LENGTH = 1_000_000  # 1MB of code
 SESSION_INACTIVITY_TIMEOUT = None  # Disabled by default - sessions don't auto-timeout
 MAX_SESSIONS = 50  # Maximum concurrent sessions
@@ -134,20 +138,25 @@ def validate_timeout(timeout: int | None) -> int | None:
     """
     Validate timeout value.
 
-    Explicit timeouts are honored as given (no upper cap — omitting the
-    timeout already means unlimited), subject to a floor of MIN_TIMEOUT.
+    Explicit timeouts are honored as given (omitting the timeout already
+    means unlimited), clamped to the range MIN_TIMEOUT..MAX_TIMEOUT.
 
     Args:
         timeout: Requested timeout in seconds, or None for no timeout
 
     Returns:
         Validated timeout value, or None for no timeout
+
+    Raises:
+        ValueError: If timeout is NaN or infinite.
     """
     if timeout is None:
         return None
     if not isinstance(timeout, (int, float)):
         return None
-    return max(MIN_TIMEOUT, int(timeout))
+    if isinstance(timeout, float) and not math.isfinite(timeout):
+        raise ValueError(f"Invalid timeout value: {timeout}")
+    return max(MIN_TIMEOUT, min(int(timeout), MAX_TIMEOUT))
 
 
 def detect_optimal_jobs() -> tuple[int | None, str]:
@@ -429,7 +438,10 @@ class ACL2Session:
                 return f"Error: Command exceeds maximum length of {MAX_CODE_LENGTH} characters"
 
             # SECURITY: Validate timeout
-            validated_timeout = validate_timeout(timeout)
+            try:
+                validated_timeout = validate_timeout(timeout)
+            except ValueError as e:
+                return f"Error: {e}"
 
             try:
                 # Capture sequence counters BEFORE adding anything to queues or
@@ -1975,7 +1987,10 @@ async def run_acl2(code: str, timeout: int | None = None) -> str:
     if len(code) > MAX_CODE_LENGTH:
         return f"Error: Code exceeds maximum length of {MAX_CODE_LENGTH} characters"
 
-    validated_timeout = validate_timeout(timeout)
+    try:
+        validated_timeout = validate_timeout(timeout)
+    except ValueError as e:
+        return f"Error: {e}"
 
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".lisp", delete=False
