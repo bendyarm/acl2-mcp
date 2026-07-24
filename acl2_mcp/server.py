@@ -148,12 +148,12 @@ def validate_timeout(timeout: int | None) -> int | None:
         Validated timeout value, or None for no timeout
 
     Raises:
-        ValueError: If timeout is NaN or infinite.
+        ValueError: If timeout is not a number, or is NaN or infinite.
     """
     if timeout is None:
         return None
     if not isinstance(timeout, (int, float)):
-        return None
+        raise ValueError(f"Invalid timeout value: {timeout!r}")
     if isinstance(timeout, float) and not math.isfinite(timeout):
         raise ValueError(f"Invalid timeout value: {timeout}")
     return max(MIN_TIMEOUT, min(int(timeout), MAX_TIMEOUT))

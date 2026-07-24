@@ -39,8 +39,7 @@ The ACL2 MCP server executes arbitrary ACL2 code provided by the client. This is
   ceiling is far beyond any realistic use and exists to prevent float
   overflow in downstream arithmetic
 - Prevents negative or zero values
-- Rejects NaN and infinite values with an error
-- Handles invalid types gracefully (treated as no timeout)
+- Rejects non-numeric types, NaN, and infinite values with an error
 
 **Code Length**:
 - Maximum 1MB of code per request (both one-off and session modes)

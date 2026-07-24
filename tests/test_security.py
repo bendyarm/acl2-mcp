@@ -62,8 +62,9 @@ def test_validate_timeout_handles_float() -> None:
 
 
 def test_validate_timeout_handles_invalid_type() -> None:
-    """Test that invalid types fall back to no timeout."""
-    assert validate_timeout("invalid") is None  # type: ignore
+    """Test that non-numeric types are rejected with an error."""
+    with pytest.raises(ValueError, match="Invalid timeout"):
+        validate_timeout("invalid")  # type: ignore
 
 
 def test_validate_acl2_identifier_rejects_quotes() -> None:

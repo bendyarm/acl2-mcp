@@ -6,9 +6,10 @@
   unlimited default you get by omitting the timeout entirely.  Explicit
   timeouts are now honored as given, clamped to the range 1 second to
   2^31-1 seconds (~68 years — the ceiling exists only to keep the
-  arithmetic safe).  NaN and infinite timeout values are rejected with
-  a clear error; previously they crashed timeout validation with an
-  unhandled exception.
+  arithmetic safe).  Non-numeric, NaN, and infinite timeout values are
+  rejected with a clear error; previously NaN and infinity crashed
+  timeout validation with an unhandled exception, and non-numeric
+  values silently disabled the timeout.
 
 # Changes — 2026-05-24
 
