@@ -1,3 +1,16 @@
+# Changes — 2026-07-23
+
+- Removed the hard-coded 300-second timeout cap.  Explicit timeouts
+  passed to tools were silently clamped to 5 minutes, which is shorter
+  than many real proofs and book certifications — and shorter than the
+  unlimited default you get by omitting the timeout entirely.  Explicit
+  timeouts are now honored as given, clamped to the range 1 second to
+  2^31-1 seconds (~68 years — the ceiling exists only to keep the
+  arithmetic safe).  Non-numeric, NaN, and infinite timeout values are
+  rejected with a clear error; previously NaN and infinity crashed
+  timeout validation with an unhandled exception, and non-numeric
+  values silently disabled the timeout.
+
 # Changes — 2026-05-24
 
 - Improved the organization of the README.md installation instructions,

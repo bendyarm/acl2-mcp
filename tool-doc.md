@@ -261,7 +261,7 @@ Retry the last proof attempt in a session with different hints or strategies. Th
 - Maximum of 50 checkpoints per session
 
 ### Timeouts
-- All timeouts are clamped to the range 1-300 seconds (5 minutes max)
+- Explicit timeouts are honored as given, clamped to 1s..2^31-1s (~68 years); non-numeric, NaN, and infinite values are rejected
 - If no timeout is specified, operations run until completion (no timeout)
 - Use timeouts to prevent infinite loops or very long-running operations
 
