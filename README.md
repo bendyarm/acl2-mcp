@@ -10,6 +10,8 @@ There has been some use with Claude Desktop, so we believe that will work as wel
 There is an `AGENTS.md` file that should work with other agentic models.  And, of course,
 any client that can make use of the tools is welcome.  Feedback is appreciated.
 
+A section near the end of this README describes how to register the MCP server with Codex.
+
 ## Features
 
 This MCP server exposes 15 tools for working with ACL2, including support for persistent sessions that enable incremental development.
@@ -484,6 +486,24 @@ Rarely used; mainly for testing ACL2 startup file handling. When no `session_id`
 4. Cleans up the temporary file and terminates ACL2
 
 Default timeout is 30 seconds per command, configurable per request.
+
+## Registering the MCP with Codex
+
+Run
+```bash
+codex mcp add acl2 -- "<path-to-acl2-mcp>/venv/bin/acl2-mcp"
+```
+
+That will add the following to your `~/.codex/config.toml`:
+```toml
+[mcp_servers.acl2]
+command = "<path-to-acl2-mcp>/venv/bin/acl2-mcp"
+```
+
+If your scripts to run ACL2 rely on the `ACL2` environment variable, add the following just after the `command` line above:
+```toml
+env_vars = ["ACL2"]
+```
 
 ## License
 
