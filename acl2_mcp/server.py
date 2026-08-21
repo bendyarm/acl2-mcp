@@ -889,57 +889,71 @@ class ACL2Session:
 
     async def _logger_task(self) -> None:
         """
-        Background task that reads from merge queue and writes to log file.
-        Maintains timestamp ordering and updates output_buffer for send_command.
+        Background task that reads from the merge queue, appends lines to
+        output_buffer, and writes them to the log file when logging is
+        enabled.
+
+        This task must run even when logging is disabled: startup prompt
+        detection and output collection in send_command both read from
+        output_buffer, and the merge queue would grow without bound if
+        nothing drained it.
         """
+        log_handle = None
         try:
-            if not self.log_file:
-                return
+            if self.log_file:
+                # Open log file with aiofiles for non-blocking async I/O
+                log_handle = await aiofiles.open(self.log_file, "a", buffering=1)
 
-            # Open log file with aiofiles for non-blocking async I/O
-            async with aiofiles.open(self.log_file, "a", buffering=1) as log_handle:
-                while not self.shutdown_event.is_set():
-                    try:
-                        # Get next line from merge queue with timeout
-                        timestamp, seq_id, stream_type, line = await asyncio.wait_for(
-                            self.merge_queue.get(),
-                            timeout=1.0  # Check shutdown event periodically
-                        )
+            while not self.shutdown_event.is_set():
+                try:
+                    # Get next line from merge queue with timeout
+                    timestamp, seq_id, stream_type, line = await asyncio.wait_for(
+                        self.merge_queue.get(),
+                        timeout=1.0  # Check shutdown event periodically
+                    )
 
-                        # Write to log file
+                    # Write to log file
+                    if log_handle is not None:
                         await log_handle.write(line)
                         await log_handle.flush()
 
-                        # Also store in output_buffer for send_command to collect output
-                        self.output_buffer.append((seq_id, line))
+                    # Also store in output_buffer for send_command to collect output
+                    self.output_buffer.append((seq_id, line))
 
-                        # Check if buffer is getting too large (keep last 50000 lines)
-                        if len(self.output_buffer) > 50000:
-                            self.output_buffer = self.output_buffer[-50000:]
-                            print(f"Warning: Output buffer trimmed for session {self.session_id}", file=sys.stderr)
+                    # Check if buffer is getting too large (keep last 50000 lines)
+                    if len(self.output_buffer) > 50000:
+                        self.output_buffer = self.output_buffer[-50000:]
+                        print(f"Warning: Output buffer trimmed for session {self.session_id}", file=sys.stderr)
 
-                    except asyncio.TimeoutError:
-                        # No data in queue, continue checking shutdown
-                        continue
-                    except Exception as e:
-                        print(f"Error in logger task: {e}", file=sys.stderr)
-                        break
+                except asyncio.TimeoutError:
+                    # No data in queue, continue checking shutdown
+                    continue
+                except Exception as e:
+                    print(f"Error in logger task: {e}", file=sys.stderr)
+                    break
 
-                # Drain remaining items in queue before shutting down
-                while not self.merge_queue.empty():
-                    try:
-                        timestamp, seq_id, stream_type, line = self.merge_queue.get_nowait()
+            # Drain remaining items in queue before shutting down
+            while not self.merge_queue.empty():
+                try:
+                    timestamp, seq_id, stream_type, line = self.merge_queue.get_nowait()
+                    if log_handle is not None:
                         await log_handle.write(line)
                         await log_handle.flush()
-                        self.output_buffer.append((seq_id, line))
-                    except asyncio.QueueEmpty:
-                        break
-                    except Exception as e:
-                        print(f"Error draining queue: {e}", file=sys.stderr)
-                        break
+                    self.output_buffer.append((seq_id, line))
+                except asyncio.QueueEmpty:
+                    break
+                except Exception as e:
+                    print(f"Error draining queue: {e}", file=sys.stderr)
+                    break
 
         except Exception as e:
             print(f"Fatal error in logger task: {e}", file=sys.stderr)
+        finally:
+            if log_handle is not None:
+                try:
+                    await log_handle.close()
+                except Exception as e:
+                    print(f"Error closing log file: {e}", file=sys.stderr)
 
     async def terminate(self) -> None:
         """
@@ -1252,6 +1266,33 @@ class SessionManager:
         self.sessions: dict[str, ACL2Session] = {}
         self._cleanup_task: Optional[asyncio.Task[None]] = None
 
+    async def _report_startup_failure(self, session: ACL2Session) -> str:
+        """
+        Clean up a session whose ACL2 process died during startup and build
+        an error message from its exit code and captured output.
+
+        The session has not been registered in self.sessions yet.
+        """
+        process = session.process
+        try:
+            exit_code: int | None = await asyncio.wait_for(process.wait(), timeout=2.0)
+        except Exception:
+            exit_code = process.returncode
+        # Give the PTY reader a moment to drain any final output, then
+        # capture it before terminate() clears the ring buffer.
+        await asyncio.sleep(0.3)
+        output = bytes(session.ring_buffer).decode(errors="replace").strip()
+        await session.terminate()
+
+        message = "Error: ACL2 process exited during session startup"
+        if exit_code is not None:
+            message += f" (exit code {exit_code})"
+        if output:
+            message += f"\nOutput:\n{output[-2000:]}"
+        else:
+            message += "; no output was produced"
+        return message
+
     async def start_session(
         self,
         name: Optional[str] = None,
@@ -1340,15 +1381,26 @@ class SessionManager:
 
             # Spawn ACL2 process with slave as stdin/stdout/stderr
             # Note: We call 'acl2' directly, no wrapper script needed
-            process = await asyncio.create_subprocess_exec(
-                "acl2",
-                stdin=slave_fd,
-                stdout=slave_fd,
-                stderr=slave_fd,
-                cwd=cwd,
-                env=env,
-                preexec_fn=setup_controlling_tty,  # Critical for proper terminal setup
-            )
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    "acl2",
+                    stdin=slave_fd,
+                    stdout=slave_fd,
+                    stderr=slave_fd,
+                    cwd=cwd,
+                    env=env,
+                    preexec_fn=setup_controlling_tty,  # Critical for proper terminal setup
+                )
+            except FileNotFoundError as e:
+                os.close(master_fd)
+                os.close(slave_fd)
+                if cwd is not None and e.filename == cwd:
+                    return "", f"Error: Working directory not found: {cwd}"
+                return "", "Error: The 'acl2' executable was not found on PATH"
+            except PermissionError:
+                os.close(master_fd)
+                os.close(slave_fd)
+                return "", "Error: The 'acl2' executable exists but is not executable (permission denied)"
 
             # Close slave_fd in parent process (child inherited it)
             os.close(slave_fd)
@@ -1404,6 +1456,10 @@ class SessionManager:
                         break
                 if startup_complete:
                     break
+                # If the ACL2 process died during startup, report why
+                # instead of registering a dead session.
+                if process.returncode is not None or session.shutdown_event.is_set():
+                    return "", await self._report_startup_failure(session)
                 await asyncio.sleep(0.1)  # Check every 100ms
 
             # Open log viewer if requested
@@ -1424,8 +1480,10 @@ class SessionManager:
                 message += f"\nLog file: {session.log_file}"
             return session_id, message
 
-        except Exception:
-            # SECURITY: Don't leak internal error details
+        except Exception as e:
+            # SECURITY: Don't leak internal error details to the client,
+            # but record them in the debug log for diagnosis.
+            _debug_log(f"start_session failed: {e!r}")
             return "", "Error: Failed to start session"
 
     async def end_session(self, session_id: str) -> str:

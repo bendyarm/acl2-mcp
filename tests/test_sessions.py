@@ -21,6 +21,8 @@ cleanup issue, not a production concern.
 """
 
 import asyncio
+import os
+import time
 from typing import Any
 
 import pytest
@@ -75,6 +77,84 @@ async def test_start_session_no_name() -> None:
 
     session_id = extract_session_id(result[0].text)
     await call_tool("end_session", {"session_id": session_id})
+
+
+@pytest.mark.asyncio
+async def test_start_session_binary_not_found(tmp_path: Any, monkeypatch: Any) -> None:
+    """A missing acl2 binary should produce a specific error, not a generic one."""
+    monkeypatch.setenv("PATH", str(tmp_path))  # no acl2 anywhere on PATH
+
+    result = await call_tool("start_session", {"view_log_in_terminal": False})
+
+    assert len(result) == 1
+    assert "'acl2' executable was not found on PATH" in result[0].text
+
+
+@pytest.mark.asyncio
+async def test_start_session_binary_not_executable(tmp_path: Any, monkeypatch: Any) -> None:
+    """An acl2 file without execute permission should report permission denied."""
+    fake_acl2 = tmp_path / "acl2"
+    fake_acl2.write_text("#!/bin/sh\nexit 0\n")
+    fake_acl2.chmod(0o644)
+    monkeypatch.setenv("PATH", str(tmp_path))
+
+    result = await call_tool("start_session", {"view_log_in_terminal": False})
+
+    assert len(result) == 1
+    assert "not executable" in result[0].text
+
+
+@pytest.mark.asyncio
+async def test_start_session_binary_dies_immediately(tmp_path: Any, monkeypatch: Any) -> None:
+    """An acl2 binary that exits during startup should report its exit code
+    and captured output instead of registering a dead session."""
+    fake_acl2 = tmp_path / "acl2"
+    fake_acl2.write_text("#!/bin/sh\necho 'fatal: could not load image' >&2\nexit 3\n")
+    fake_acl2.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+
+    sessions_before = set(session_manager.sessions)
+    result = await call_tool("start_session", {"view_log_in_terminal": False})
+
+    assert len(result) == 1
+    text = result[0].text
+    assert "exited during session startup" in text
+    assert "exit code 3" in text
+    assert "fatal: could not load image" in text
+    # The dead session must not be registered
+    assert set(session_manager.sessions) == sessions_before
+
+
+@pytest.mark.asyncio
+async def test_start_session_without_logging() -> None:
+    """Sessions with logging disabled should start promptly and return
+    command output.
+
+    Previously output_buffer was only populated by the logging task, so
+    with enable_logging=False startup prompt detection always burned the
+    full 10-second wait and every command returned empty output.
+    """
+    start = time.monotonic()
+    result = await call_tool("start_session", {
+        "enable_logging": False,
+        "view_log_in_terminal": False,
+    })
+    elapsed = time.monotonic() - start
+
+    assert len(result) == 1
+    assert "Session started successfully" in result[0].text
+    assert "Log file" not in result[0].text
+    assert elapsed < 8.0, f"startup took {elapsed:.1f}s (10-second-wait bug?)"
+
+    session_id = extract_session_id(result[0].text)
+    try:
+        eval_result = await call_tool("evaluate", {
+            "code": "(+ 1 2)",
+            "session_id": session_id,
+        })
+        assert "3" in eval_result[0].text
+    finally:
+        await call_tool("end_session", {"session_id": session_id})
 
 
 @pytest.mark.asyncio
