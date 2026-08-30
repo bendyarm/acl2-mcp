@@ -29,6 +29,12 @@ When calling the MCP tools:
 - **Regular file paths** (e.g., `check_theorem`, `query_event`): supply
   the full path *with* the `.lisp` extension.
 
+## ACL2 MCP startup
+
+Before starting an ACL2 MCP session, do not pass `view_log_in_terminal`
+unless the user explicitly asks. Let the MCP server use its configured default
+from `~/.config/acl2-mcp/config.toml`
+
 ## Skills
 
 ### acl2-doc-lookup
