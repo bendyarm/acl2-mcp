@@ -171,12 +171,13 @@ Verify a specific theorem from a file. Use this to re-check a single theorem aft
 
 ### query_event
 
-Look up the definition and properties of an ACL2 function, theorem, or macro. Use this to understand what's already defined before writing new code, or to check the signature of existing functions. Works with built-in ACL2 functions (e.g., 'append', 'len') or user-defined ones. Uses ACL2's :pe (print-event) command.
+Look up the definition and properties of an ACL2 function, theorem, or macro. Use this to understand what's already defined before writing new code, or to check the signature of existing functions. Works with built-in ACL2 functions (e.g., 'append', 'len') or user-defined ones. Uses ACL2's :pe (print-event) command. To query something defined in a persistent session, pass session_id; without it, the query runs in a fresh ACL2 that knows nothing about any session.
 
 **Parameters:**
 
 - `name` (required): Name of function/theorem to query. Examples: 'append', 'len', 'my-custom-function'
-- `file_path` (optional): Optional: Load this file first (WITH .lisp extension) before querying. Use if the event is defined in a specific file.
+- `file_path` (optional): Optional: Load this file first (WITH .lisp extension) before querying. Use if the event is defined in a specific file. Not compatible with session_id.
+- `session_id` (optional): Optional: ID of persistent session to query in. Required to see events defined in that session.
 - `timeout` (optional): Timeout in seconds (optional, no timeout if not specified)
 
 ---

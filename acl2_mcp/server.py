@@ -1817,7 +1817,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="query_event",
-            description="Look up the definition and properties of an ACL2 function, theorem, or macro. Use this to understand what's already defined before writing new code, or to check the signature of existing functions. Works with built-in ACL2 functions (e.g., 'append', 'len') or user-defined ones. Uses ACL2's :pe (print-event) command.",
+            description="Look up the definition and properties of an ACL2 function, theorem, or macro. Use this to understand what's already defined before writing new code, or to check the signature of existing functions. Works with built-in ACL2 functions (e.g., 'append', 'len') or user-defined ones. Uses ACL2's :pe (print-event) command. To query something defined in a persistent session, pass session_id; without it, the query runs in a fresh ACL2 that knows nothing about any session.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1827,7 +1827,11 @@ async def list_tools() -> list[Tool]:
                     },
                     "file_path": {
                         "type": "string",
-                        "description": "Optional: Load this file first (WITH .lisp extension) before querying. Use if the event is defined in a specific file.",
+                        "description": "Optional: Load this file first (WITH .lisp extension) before querying. Use if the event is defined in a specific file. Not compatible with session_id.",
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Optional: ID of persistent session to query in. Required to see events defined in that session.",
                     },
                     "timeout": {
                         "type": "number",
@@ -2374,6 +2378,12 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
                 )
             ]
 
+        # Before undoing, capture the commands that are about to be removed,
+        # so we can report what was actually undone.  (The output of :u/:ubt
+        # itself shows the most recent SURVIVING command, which is easy to
+        # misread as the removed one.)
+        removed = await session.send_command(f":pbt (:x -{count - 1})")
+
         # Use ACL2's undo commands with relative addressing
         # :u undoes the most recent command
         # :ubt (:x -k) undoes through k commands before the most recent
@@ -2388,7 +2398,11 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
         return [
             TextContent(
                 type="text",
-                text=f"Undone {count} event(s):\n\n{output}",
+                text=(
+                    f"Undone {count} event(s).\n\n"
+                    f"Removed (listed oldest first):\n{removed}\n\n"
+                    f"Most recent surviving command (from ACL2's undo output):\n{output}"
+                ),
             )
         ]
 
@@ -2811,9 +2825,32 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
     elif name == "query_event":
         name_arg = arguments["name"]
         file_path = arguments.get("file_path", "")
+        session_id = arguments.get("session_id")
         timeout = arguments.get("timeout")
 
-        output = await query_acl2_event(name_arg, file_path, timeout)
+        if session_id:
+            if file_path:
+                return [
+                    TextContent(
+                        type="text",
+                        text="Error: file_path cannot be combined with session_id; use include_book or evaluate to load the file into the session first.",
+                    )
+                ]
+            try:
+                validated_name = validate_acl2_identifier(name_arg)
+            except ValueError as e:
+                return [TextContent(type="text", text=f"Error: {e}")]
+            session = session_manager.get_session(session_id)
+            if not session:
+                return [
+                    TextContent(
+                        type="text",
+                        text=f"Error: Session {session_id} not found",
+                    )
+                ]
+            output = await session.send_command(f":pe {validated_name}", timeout)
+        else:
+            output = await query_acl2_event(name_arg, file_path, timeout)
 
         return [
             TextContent(

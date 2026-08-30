@@ -15,7 +15,8 @@ This skill starts a persistent ACL2 session using the Model Context Protocol (MC
 1. **Check MCP ACL2 server availability**:
    - Attempt to use `mcp__acl2__list_sessions` to verify the MCP ACL2 server is available
    - **If the tool is not available or returns an error**:
-     - Report: "Sorry, the MCP ACL2 server is not available. The MCP server must be configured in the directory from which Claude Code was started. Please run `/mcp` to check your MCP configuration or visit https://docs.claude.com/en/docs/claude-code/mcp to learn more."
+     - If you are in an environment where MCP servers cannot be registered with your tool harness (e.g. a Claude Cowork / cloud sandbox session), you can instead drive the server directly over stdio with `for-agents/mcp_stdio_client.py` in this repository; the same tools are then available via its `call` method, and the rest of this skill's guidance applies with that substitution.
+     - Otherwise report: "Sorry, the MCP ACL2 server is not available. The MCP server must be configured in the directory from which Claude Code was started. Please run `/mcp` to check your MCP configuration or visit https://docs.claude.com/en/docs/claude-code/mcp to learn more."
      - **STOP** - do not continue with the remaining steps in this skill or any subsequent steps in any calling skill
    - **If successful**, proceed to step 2
 
