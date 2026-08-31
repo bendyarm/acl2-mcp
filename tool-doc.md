@@ -2,7 +2,7 @@
 
 > **Note**: This documentation was automatically extracted from the tool definitions in `acl2_mcp/server.py` on 2025-11-03. The source of truth for tool behavior is the Python code itself.
 
-This document provides detailed reference documentation for all 17 tools provided by the ACL2 MCP server.
+This document provides detailed reference documentation for all 21 tools provided by the ACL2 MCP server.
 
 ## Table of Contents
 
@@ -22,6 +22,8 @@ This document provides detailed reference documentation for all 17 tools provide
   - [check_theorem](#check_theorem)
 - [Query and Verification Tools](#query-and-verification-tools)
   - [query_event](#query_event)
+  - [xdoc_search](#xdoc_search)
+  - [xdoc_show](#xdoc_show)
   - [verify_guards](#verify_guards)
 - [Session State Management Tools](#session-state-management-tools)
   - [undo](#undo)
@@ -179,6 +181,29 @@ Look up the definition and properties of an ACL2 function, theorem, or macro. Us
 - `file_path` (optional): Optional: Load this file first (WITH .lisp extension) before querying. Use if the event is defined in a specific file. Not compatible with session_id.
 - `session_id` (optional): Optional: ID of persistent session to query in. Required to see events defined in that session.
 - `timeout` (optional): Timeout in seconds (optional, no timeout if not specified)
+
+---
+
+### xdoc_search
+
+Search the local xdoc agent corpus (the built manual as one plain-text file per topic plus an index; produced by the acl2-docker project, shipped in the acl2-allcerts image at $ACL2_ROOT/books/doc/agent-corpus or named by the ACL2_XDOC_CORPUS environment variable) for topics matching a query.  Millisecond name/summary search; optional full-text body search.  Needs no ACL2 session.  Follow up with xdoc_show.
+
+**Parameters:**
+
+- `query` (required): Case-insensitive substring. Examples: 'tail recursion', 'bvplus'
+- `full_text` (optional): Also search topic bodies (slower: ~1 s). Default false.
+- `max_results` (optional): Maximum results (default 20).
+
+---
+
+### xdoc_show
+
+Show one topic from the local xdoc agent corpus by natural name ('bvplus', 'fty::defbitstruct') or xdoc key ('ACL2____BVPLUS').  Covers every topic in the built manual, but NOT topics defined in the current session (use :doc via evaluate for those).  Needs no ACL2 session.
+
+**Parameters:**
+
+- `name` (required): Topic to show.
+- `max_chars` (optional): Truncation limit for very large topics (default 20000).
 
 ---
 

@@ -1842,6 +1842,46 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="xdoc_search",
+            description="Search the local xdoc agent corpus (all ~77,000 manual topics as plain text; see the acl2-docker project's tools/DESIGN.md) for topics matching a query.  Fast (milliseconds) and works with no ACL2 session.  Searches topic names and one-line summaries by default; set full_text to search topic bodies too.  The corpus is found via the ACL2_XDOC_CORPUS environment variable, or at $ACL2_ROOT/books/doc/agent-corpus (present in the acl2-allcerts Docker image).  Use xdoc_show to read a found topic.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Case-insensitive substring to search for. Examples: 'tail recursion', 'bvplus', 'measure'",
+                    },
+                    "full_text": {
+                        "type": "boolean",
+                        "description": "Also search topic bodies, not just names and summaries (slower: ~1 s). Default false.",
+                    },
+                    "max_results": {
+                        "type": "number",
+                        "description": "Maximum results to return (default 20).",
+                    },
+                },
+                "required": ["query"],
+            },
+        ),
+        Tool(
+            name="xdoc_show",
+            description="Show a topic from the local xdoc agent corpus by name.  Accepts a natural name ('bvplus', 'fty::defbitstruct') or an xdoc key ('ACL2____BVPLUS').  Fast and needs no ACL2 session; covers every topic in the built manual, but NOT topics defined in your own session (use :doc via evaluate for those).  Corpus location: see xdoc_search.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Topic to show. Examples: 'bvplus', 'fty::defbitstruct', 'ACL2____DEFTHM-STP'",
+                    },
+                    "max_chars": {
+                        "type": "number",
+                        "description": "Truncate the topic body beyond this many characters (default 20000; some topics, e.g. release notes, are very large).",
+                    },
+                },
+                "required": ["name"],
+            },
+        ),
+        Tool(
             name="verify_guards",
             description="Verify that a function's guards are satisfied, enabling efficient execution in raw Common Lisp. Guards are conditions that ensure a function is called with valid inputs. Use this after defining a function to enable faster execution. Common workflow: 1) Define function with 'evaluate', 2) Verify guards with this tool. Example: After defining (defun my-div (x y) (/ x y)), verify guards to ensure y is never zero.",
             inputSchema={
@@ -2271,6 +2311,143 @@ async def verify_function_guards(function_name: str, file_path: str = "", timeou
     code += f"(verify-guards {validated_name})"
 
     return await run_acl2(code, timeout)
+
+
+# ---------------------------------------------------------------------------
+# Local xdoc agent corpus (xdoc_search / xdoc_show)
+#
+# The corpus is the built ACL2 manual converted to one plain-text file per
+# topic plus an index.tsv (natural-name <TAB> KEY <TAB> short).  It is
+# produced by the acl2-docker project (tools/xdoc_extract.py; see its
+# tools/DESIGN.md), ships in the acl2-allcerts Docker image at
+# $ACL2_ROOT/books/doc/agent-corpus, and is also distributed as a tarball
+# on that project's rolling "xdoc-corpus" release.  These tools are thin
+# conveniences over it: everything they do can also be done with grep.
+
+_XDOC_NO_CORPUS_MSG = (
+    "No local xdoc corpus found.  Set the ACL2_XDOC_CORPUS environment "
+    "variable to a corpus directory (one containing index.tsv and topics/), "
+    "or run in an environment that has one at "
+    "$ACL2_ROOT/books/doc/agent-corpus (e.g. the acl2-allcerts Docker "
+    "image).  A corpus tarball is published on the acl2-docker project's "
+    "'xdoc-corpus' release.  Without a corpus, use :doc in an ACL2 session "
+    "(via the evaluate tool) for topics whose books are loaded."
+)
+
+
+def find_xdoc_corpus() -> Path | None:
+    """Locate the local xdoc agent corpus, or None if unavailable."""
+    candidates = []
+    env_dir = os.environ.get("ACL2_XDOC_CORPUS")
+    if env_dir:
+        candidates.append(Path(env_dir))
+    acl2_root = os.environ.get("ACL2_ROOT")
+    if acl2_root:
+        candidates.append(Path(acl2_root) / "books" / "doc" / "agent-corpus")
+    for cand in candidates:
+        if (cand / "index.tsv").is_file() and (cand / "topics").is_dir():
+            return cand
+    return None
+
+
+def _xdoc_index_rows(corpus: Path) -> list[tuple[str, str, str]]:
+    """Parse index.tsv into (natural-name, key, short) rows."""
+    rows = []
+    with open(corpus / "index.tsv", encoding="utf-8") as f:
+        for line in f:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) >= 3:
+                rows.append((parts[0], parts[1], parts[2]))
+    return rows
+
+
+def xdoc_corpus_search(query: str, full_text: bool, max_results: int) -> str:
+    corpus = find_xdoc_corpus()
+    if corpus is None:
+        return _XDOC_NO_CORPUS_MSG
+    max_results = validate_integer_parameter(max_results, 1, 200, "max_results")
+    q = query.lower()
+
+    hits = [(nat, key, short) for (nat, key, short) in _xdoc_index_rows(corpus)
+            if q in nat.lower() or q in short.lower()]
+    lines = [f"{nat}\t{short}" for (nat, key, short) in hits[:max_results]]
+    out = ""
+    if lines:
+        out += (f"{len(hits)} name/summary match(es)"
+                f"{' (first ' + str(max_results) + ')' if len(hits) > max_results else ''}"
+                f" -- read one with xdoc_show:\n" + "\n".join(lines))
+
+    if full_text:
+        try:
+            proc = subprocess.run(
+                ["grep", "-r", "-i", "-m", "1", "-F", query,
+                 str(corpus / "topics")],
+                capture_output=True, text=True, timeout=60)
+            body_lines = []
+            for line in proc.stdout.splitlines():
+                path, _, match = line.partition(":")
+                topic_key = Path(path).stem
+                body_lines.append(f"{topic_key}\t{match.strip()[:120]}")
+                if len(body_lines) >= max_results:
+                    break
+            if body_lines:
+                out += ("\n\nfull-text match(es) (topic key, first matching "
+                        "line):\n" + "\n".join(body_lines))
+        except (OSError, subprocess.TimeoutExpired) as e:
+            out += f"\n\n(full-text search unavailable: {e})"
+
+    if not out:
+        out = (f"No matches for {query!r} in topic names, summaries, or bodies."
+               if full_text else
+               f"No matches for {query!r} in topic names or summaries."
+               "  Try again with full_text: true to search topic bodies.")
+    return out
+
+
+def xdoc_corpus_show(name: str, max_chars: int) -> str:
+    corpus = find_xdoc_corpus()
+    if corpus is None:
+        return _XDOC_NO_CORPUS_MSG
+    max_chars = validate_integer_parameter(max_chars, 200, 2_000_000, "max_chars")
+
+    def read_topic(key: str) -> str:
+        text = (corpus / "topics" / f"{key}.txt").read_text(encoding="utf-8")
+        if len(text) > max_chars:
+            text = (text[:max_chars]
+                    + f"\n\n[... truncated at {max_chars} characters; "
+                    f"pass a larger max_chars for more]")
+        return text
+
+    # 1. Treat the argument as an xdoc KEY / corpus file name.
+    if re.fullmatch(r"[A-Za-z0-9_.-]+", name):
+        if (corpus / "topics" / f"{name}.txt").is_file():
+            return read_topic(name)
+        upper = name.upper()
+        if (corpus / "topics" / f"{upper}.txt").is_file():
+            return read_topic(upper)
+
+    # 2. Resolve as a natural name via the index.
+    rows = _xdoc_index_rows(corpus)
+    lname = name.lower()
+    exact = [(nat, key) for (nat, key, _s) in rows if nat.lower() == lname]
+    if not exact:
+        # A bare name may match a package-qualified topic (defbitstruct ->
+        # fty::defbitstruct).
+        exact = [(nat, key) for (nat, key, _s) in rows
+                 if nat.lower().endswith("::" + lname)]
+    if len(exact) == 1:
+        return read_topic(exact[0][1])
+    if len(exact) > 1:
+        listing = "\n".join(f"{nat}  (key: {key})" for (nat, key) in exact)
+        return (f"Ambiguous topic {name!r}; candidates:\n{listing}\n"
+                f"Call xdoc_show again with one of these keys.")
+
+    close = [nat for (nat, _k, _s) in rows if lname in nat.lower()][:10]
+    if close:
+        return (f"No topic named {name!r}.  Close matches:\n"
+                + "\n".join(close))
+    return (f"No topic named {name!r} in the corpus.  Use xdoc_search to "
+            f"look for it, or :doc in a session for session-defined topics.")
 
 
 @app.call_tool()  # type: ignore[misc]
@@ -2852,6 +3029,35 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
         else:
             output = await query_acl2_event(name_arg, file_path, timeout)
 
+        return [
+            TextContent(
+                type="text",
+                text=output,
+            )
+        ]
+
+    elif name == "xdoc_search":
+        query = arguments["query"]
+        full_text = bool(arguments.get("full_text", False))
+        max_results = int(arguments.get("max_results", 20))
+        try:
+            output = xdoc_corpus_search(query, full_text, max_results)
+        except ValueError as e:
+            output = f"Error: {e}"
+        return [
+            TextContent(
+                type="text",
+                text=output,
+            )
+        ]
+
+    elif name == "xdoc_show":
+        topic_name = arguments["name"]
+        max_chars = int(arguments.get("max_chars", 20000))
+        try:
+            output = xdoc_corpus_show(topic_name, max_chars)
+        except ValueError as e:
+            output = f"Error: {e}"
         return [
             TextContent(
                 type="text",
