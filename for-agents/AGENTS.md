@@ -41,6 +41,25 @@ from `~/.config/acl2-mcp/config.toml`
 
 Use this skill to look up ACL2 documentation for symbols, functions, macros, and concepts.
 
+#### Prefer the local corpus (offline, milliseconds)
+
+Before any online lookup, try the local xdoc agent corpus:
+
+1. **Via the MCP server** (if available): `mcp__acl2__xdoc_search` with a
+   query, then `mcp__acl2__xdoc_show` with the topic name.  These need no
+   ACL2 session.
+2. **Directly with grep** (works in any environment that has a corpus,
+   e.g. the acl2-allcerts Docker image at
+   `$ACL2_ROOT/books/doc/agent-corpus`, or a directory named by the
+   `ACL2_XDOC_CORPUS` environment variable):
+   - discover: `grep -i 'QUERY' $CORPUS/index.tsv`
+   - read: open `$CORPUS/topics/<KEY>.txt` (KEY is column 2 of the index)
+   - full-text: `grep -ril 'QUERY' $CORPUS/topics/`
+
+The corpus covers every topic in the built manual but NOT topics defined
+in the current session; use `:doc` via the `evaluate` tool for those.
+Only fall back to the online lookup below when no corpus is available.
+
 #### URL Pattern
 
 The ACL2 documentation has an SEO-friendly interface that loads quickly, for example:
