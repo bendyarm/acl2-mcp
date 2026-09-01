@@ -6,7 +6,6 @@ Known failures as of 2026-04-05:
   termination timing.
 
 Pre-existing failures in other test files (not in this file):
-- test_security.py::test_validate_timeout_handles_invalid_type
 - test_server.py::test_call_tool_certify_book_nonexistent: Test expects
   "not found" but make returns "No rule to make target".
 

@@ -14,9 +14,40 @@ from acl2_mcp.server import (
 )
 
 
-def test_validate_timeout_clamps_max() -> None:
-    """Test that timeout is clamped to maximum."""
-    assert validate_timeout(1000) == 300
+def test_validate_timeout_honors_large_values() -> None:
+    """Test that realistic large explicit timeouts are honored, not clamped."""
+    assert validate_timeout(1000) == 1000
+    assert validate_timeout(2**31 - 1) == 2**31 - 1
+
+
+def test_validate_timeout_clamps_huge_values() -> None:
+    """Test that absurdly large timeouts clamp to MAX_TIMEOUT (~68 years).
+
+    The ceiling keeps validated timeouts small enough that downstream
+    float arithmetic cannot overflow.
+    """
+    assert validate_timeout(2**31) == 2**31 - 1
+    assert validate_timeout(10**100) == 2**31 - 1
+
+
+def test_validate_timeout_rejects_nonfinite() -> None:
+    """Test that NaN and infinite timeouts raise ValueError.
+
+    They previously escaped as unhandled OverflowError/ValueError
+    from the int() conversion.
+    """
+    for bad in (float("inf"), float("-inf"), float("nan")):
+        with pytest.raises(ValueError, match="Invalid timeout"):
+            validate_timeout(bad)
+
+
+@pytest.mark.asyncio
+async def test_call_tool_rejects_infinite_timeout() -> None:
+    """Test that a non-finite timeout surfaces as a clean tool error."""
+    result = await call_tool("evaluate", {"code": "(+ 1 1)", "timeout": float("inf")})
+
+    assert len(result) == 1
+    assert "Error: Invalid timeout value" in result[0].text
 
 
 def test_validate_timeout_clamps_min() -> None:
@@ -31,8 +62,9 @@ def test_validate_timeout_handles_float() -> None:
 
 
 def test_validate_timeout_handles_invalid_type() -> None:
-    """Test that invalid types return default."""
-    assert validate_timeout("invalid") == 30  # type: ignore
+    """Test that non-numeric types are rejected with an error."""
+    with pytest.raises(ValueError, match="Invalid timeout"):
+        validate_timeout("invalid")  # type: ignore
 
 
 def test_validate_acl2_identifier_rejects_quotes() -> None:
