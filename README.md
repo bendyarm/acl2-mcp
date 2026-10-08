@@ -25,8 +25,6 @@ This MCP server exposes 15 tools for working with ACL2, including support for pe
 ### Code-based Tools
 - **prove**: Submit ACL2 theorems (defthm) for proof
 - **evaluate**: Evaluate arbitrary ACL2 expressions and definitions
-- **check_syntax**: Check ACL2 code for syntax errors
-- **admit**: Test if an ACL2 event would be admitted without error
 
 All code-based tools support an optional `session_id` parameter for incremental development.
 
@@ -36,7 +34,6 @@ All code-based tools support an optional `session_id` parameter for incremental 
 
 ### Query and Verification Tools
 - **query_event**: Query information about a defined function, theorem, or event (uses :pe)
-- **verify_guards**: Verify guards for a function to ensure efficient execution
 
 ### Session State Management Tools
 - **undo**: Undo the last N events in a session
@@ -375,12 +372,6 @@ Arguments:
 (factorial 5)
 ```
 
-**Check Syntax:**
-```lisp
-(defun my-function (x y)
-  (+ x y))
-```
-
 ### File-based Tools
 
 **Certify a Book:**
@@ -411,16 +402,6 @@ Arguments:
 
 ### Query and Verification Tools
 
-**Admit an Event:**
-```
-Tool: admit
-Arguments:
-  code: "(defun my-func (x) (+ x 1))"
-  timeout: 30  (optional)
-
-Returns whether the event would be admitted successfully.
-```
-
 **Query an Event:**
 ```
 Tool: query_event
@@ -430,17 +411,6 @@ Arguments:
   timeout: 30  (optional)
 
 Returns the definition and properties of the named event.
-```
-
-**Verify Guards:**
-```
-Tool: verify_guards
-Arguments:
-  function_name: "my-function"
-  file_path: "path/to/file.lisp"  (optional, if function is in a file)
-  timeout: 60  (optional)
-
-Verifies that the function's guards are satisfied.
 ```
 
 ## Development

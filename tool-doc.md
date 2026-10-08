@@ -14,8 +14,6 @@ This document provides detailed reference documentation for all 21 tools provide
 - [Code-based Tools](#code-based-tools)
   - [prove](#prove)
   - [evaluate](#evaluate)
-  - [check_syntax](#check_syntax)
-  - [admit](#admit)
 - [File-based Tools](#file-based-tools)
   - [certify_book](#certify_book)
   - [include_book](#include_book)
@@ -23,7 +21,6 @@ This document provides detailed reference documentation for all 21 tools provide
   - [query_event](#query_event)
   - [xdoc_search](#xdoc_search)
   - [xdoc_show](#xdoc_show)
-  - [verify_guards](#verify_guards)
 - [Session State Management Tools](#session-state-management-tools)
   - [undo](#undo)
   - [get_world_state](#get_world_state)
@@ -103,28 +100,6 @@ Evaluate ACL2 expressions or define functions (defun). Use this for: 1) Defining
 
 ---
 
-### check_syntax
-
-Quickly check ACL2 code for syntax errors without full execution. Use this before 'admit' or 'prove' to catch basic errors. Faster than full evaluation but less thorough.
-
-**Parameters:**
-
-- `code` (required): ACL2 code to check
-
----
-
-### admit
-
-Test if an ACL2 event would be accepted WITHOUT saving it permanently. Use this to validate definitions/theorems before adding them to files. Faster than 'prove' for testing. Returns success/failure. Example use case: testing if a function definition is valid before committing to a file. Can optionally use a persistent session to test in context of existing definitions.
-
-**Parameters:**
-
-- `code` (required): Single ACL2 event to test. Example: (defun my-func (x) (+ x 1)) or (defthm my-thm (equal (+ 1 1) 2))
-- `timeout` (optional): Timeout in seconds (optional, no timeout if not specified)
-- `session_id` (optional): Optional: ID of persistent session to use. If not provided, creates a fresh ACL2 session for this command only.
-
----
-
 ## File-based Tools
 
 ### certify_book
@@ -188,18 +163,6 @@ Show one topic from the local xdoc agent corpus by natural name ('bvplus', 'fty:
 
 - `name` (required): Topic to show.
 - `max_chars` (optional): Truncation limit for very large topics (default 20000).
-
----
-
-### verify_guards
-
-Verify that a function's guards are satisfied, enabling efficient execution in raw Common Lisp. Guards are conditions that ensure a function is called with valid inputs. Use this after defining a function to enable faster execution. Common workflow: 1) Define function with 'evaluate', 2) Verify guards with this tool. Example: After defining (defun my-div (x y) (/ x y)), verify guards to ensure y is never zero.
-
-**Parameters:**
-
-- `function_name` (required): Name of the function to verify. Example: 'my-div'
-- `file_path` (optional): Optional: File containing the function (WITH .lisp extension). Load this first before verifying.
-- `timeout` (optional): Timeout in seconds (optional, no timeout if not specified)
 
 ---
 

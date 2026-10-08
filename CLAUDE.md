@@ -133,5 +133,5 @@ When adding/modifying tools:
 - **Strict typing**: `mypy --strict` enforced in CI/development
 - **File path conventions**:
   - Books: WITHOUT `.lisp` extension (certify_book, include_book)
-  - Regular files: WITH `.lisp` extension (query_event, verify_guards)
+  - Regular files: WITH `.lisp` extension (query_event)
 - **Async throughout**: All I/O operations use asyncio

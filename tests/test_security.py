@@ -124,15 +124,3 @@ async def test_query_event_injection_protection() -> None:
     assert len(result) == 1
     assert "Error" in result[0].text
     assert "Invalid" in result[0].text
-
-
-@pytest.mark.asyncio
-async def test_verify_guards_injection_protection() -> None:
-    """Test that verify_guards protects against code injection."""
-    malicious_name = 'len)(+ 1 1)'
-
-    result = await call_tool("verify_guards", {"function_name": malicious_name})
-
-    assert len(result) == 1
-    assert "Error" in result[0].text
-    assert "Invalid" in result[0].text

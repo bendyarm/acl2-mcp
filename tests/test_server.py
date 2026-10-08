@@ -101,39 +101,6 @@ async def test_call_tool_evaluate_with_definition() -> None:
 
 
 @pytest.mark.asyncio
-async def test_call_tool_check_syntax_valid() -> None:
-    """Test syntax checking with valid code."""
-    arguments: dict[str, Any] = {
-        "code": """
-(defun my-function (x y)
-  (+ x y))
-""",
-    }
-
-    result = await call_tool("check_syntax", arguments)
-
-    assert len(result) == 1
-    assert result[0].type == "text"
-    # Should not report syntax errors
-    assert "No obvious syntax errors" in result[0].text or "ACL2" in result[0].text
-
-
-@pytest.mark.asyncio
-async def test_call_tool_check_syntax_invalid() -> None:
-    """Test syntax checking with invalid code."""
-    arguments: dict[str, Any] = {
-        "code": "(defun incomplete",
-    }
-
-    result = await call_tool("check_syntax", arguments)
-
-    assert len(result) == 1
-    assert result[0].type == "text"
-    # Will either report syntax errors or just show ACL2 waiting for input
-    assert len(result[0].text) > 0
-
-
-@pytest.mark.asyncio
 async def test_call_tool_unknown_tool() -> None:
     """Test calling an unknown tool raises an error."""
     with pytest.raises(ValueError, match="Unknown tool"):
@@ -182,35 +149,6 @@ async def test_call_tool_include_book_nonexistent() -> None:
 
 
 @pytest.mark.asyncio
-async def test_call_tool_admit_valid() -> None:
-    """Test admit with valid ACL2 code."""
-    arguments: dict[str, Any] = {
-        "code": "(defun my-add (x y) (+ x y))",
-    }
-
-    result = await call_tool("admit", arguments)
-
-    assert len(result) == 1
-    assert result[0].type == "text"
-    assert "admit" in result[0].text.lower()
-
-
-@pytest.mark.asyncio
-async def test_call_tool_admit_invalid() -> None:
-    """Test admit with invalid ACL2 code."""
-    arguments: dict[str, Any] = {
-        "code": "(defun bad-function (x) (undefined-function x))",
-    }
-
-    result = await call_tool("admit", arguments)
-
-    assert len(result) == 1
-    assert result[0].type == "text"
-    # Should contain admit result
-    assert len(result[0].text) > 0
-
-
-@pytest.mark.asyncio
 async def test_call_tool_query_event_builtin() -> None:
     """Test query_event with a built-in function."""
     arguments: dict[str, Any] = {
@@ -234,36 +172,6 @@ async def test_call_tool_query_event_nonexistent_file() -> None:
     }
 
     result = await call_tool("query_event", arguments)
-
-    assert len(result) == 1
-    assert result[0].type == "text"
-    assert "not found" in result[0].text.lower()
-
-
-@pytest.mark.asyncio
-async def test_call_tool_verify_guards_builtin() -> None:
-    """Test verify_guards with a built-in function."""
-    arguments: dict[str, Any] = {
-        "function_name": "len",
-    }
-
-    result = await call_tool("verify_guards", arguments)
-
-    assert len(result) == 1
-    assert result[0].type == "text"
-    # Should produce some output about guards
-    assert len(result[0].text) > 0
-
-
-@pytest.mark.asyncio
-async def test_call_tool_verify_guards_nonexistent_file() -> None:
-    """Test verify_guards with nonexistent file."""
-    arguments: dict[str, Any] = {
-        "function_name": "my-func",
-        "file_path": "/tmp/nonexistent.lisp",
-    }
-
-    result = await call_tool("verify_guards", arguments)
 
     assert len(result) == 1
     assert result[0].type == "text"

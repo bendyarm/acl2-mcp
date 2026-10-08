@@ -1668,20 +1668,6 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
-            name="check_syntax",
-            description="Quickly check ACL2 code for syntax errors without full execution. Use this before 'admit' or 'prove' to catch basic errors. Faster than full evaluation but less thorough.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "code": {
-                        "type": "string",
-                        "description": "ACL2 code to check",
-                    },
-                },
-                "required": ["code"],
-            },
-        ),
-        Tool(
             name="certify_book",
             description="Certify ACL2 books using cert.pl with parallel compilation. This verifies all proofs and creates certificates for books. Book path can be relative or absolute, WITHOUT .lisp extension (e.g., 'books/kestrel/axe/top' not 'books/kestrel/axe/top.lisp'). If jobs parameter is not specified, automatically detects optimal number based on CPU count and current system load.",
             inputSchema={
@@ -1732,28 +1718,6 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["file_path"],
-            },
-        ),
-        Tool(
-            name="admit",
-            description="Test if an ACL2 event would be accepted WITHOUT saving it permanently. Use this to validate definitions/theorems before adding them to files. Faster than 'prove' for testing. Returns success/failure. Example use case: testing if a function definition is valid before committing to a file. Can optionally use a persistent session to test in context of existing definitions.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "code": {
-                        "type": "string",
-                        "description": "Single ACL2 event to test. Example: (defun my-func (x) (+ x 1)) or (defthm my-thm (equal (+ 1 1) 2))",
-                    },
-                    "timeout": {
-                        "type": "number",
-                        "description": "Timeout in seconds (optional, no timeout if not specified)",
-                    },
-                    "session_id": {
-                        "type": "string",
-                        "description": "Optional: ID of persistent session to use. If not provided, creates a fresh ACL2 session for this command only.",
-                    },
-                },
-                "required": ["code"],
             },
         ),
         Tool(
@@ -1820,28 +1784,6 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["name"],
-            },
-        ),
-        Tool(
-            name="verify_guards",
-            description="Verify that a function's guards are satisfied, enabling efficient execution in raw Common Lisp. Guards are conditions that ensure a function is called with valid inputs. Use this after defining a function to enable faster execution. Common workflow: 1) Define function with 'evaluate', 2) Verify guards with this tool. Example: After defining (defun my-div (x y) (/ x y)), verify guards to ensure y is never zero.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "function_name": {
-                        "type": "string",
-                        "description": "Name of the function to verify. Example: 'my-div'",
-                    },
-                    "file_path": {
-                        "type": "string",
-                        "description": "Optional: File containing the function (WITH .lisp extension). Load this first before verifying.",
-                    },
-                    "timeout": {
-                        "type": "number",
-                        "description": "Timeout in seconds (optional, no timeout if not specified)",
-                    },
-                },
-                "required": ["function_name"],
             },
         ),
         Tool(
@@ -2157,41 +2099,6 @@ async def query_acl2_event(name: str, file_path: str = "", timeout: int | None =
 
     # Use :pe (print event) to show the definition
     code += f":pe {validated_name}"
-
-    return await run_acl2(code, timeout)
-
-
-async def verify_function_guards(function_name: str, file_path: str = "", timeout: int | None = None) -> str:
-    """
-    Verify guards for a function.
-
-    Args:
-        function_name: Name of the function
-        file_path: Optional file containing the function
-        timeout: Timeout in seconds, or None for no timeout
-
-    Returns:
-        Output from ACL2
-    """
-    # Validate the function name
-    try:
-        validated_name = validate_acl2_identifier(function_name)
-    except ValueError as e:
-        return f"Error: {e}"
-
-    # Build code to load file (if provided) and verify guards
-    code = ""
-    if file_path:
-        try:
-            abs_path = validate_file_path(file_path)
-        except ValueError as e:
-            return f"Error: {e}"
-
-        escaped_path = escape_acl2_string(str(abs_path))
-        code += f'(ld "{escaped_path}")\n'
-
-    # Use verify-guards command
-    code += f"(verify-guards {validated_name})"
 
     return await run_acl2(code, timeout)
 
@@ -2553,30 +2460,6 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             )
         ]
 
-    elif name == "check_syntax":
-        code = arguments["code"]
-
-        # For syntax checking, we can try to parse without executing
-        # ACL2 doesn't have a dedicated syntax checker, so we'll just
-        # try to load it with a very short timeout
-        output = await run_acl2(code, timeout=5)
-
-        # Check for common error patterns
-        if "Error:" in output or "HARD ACL2 ERROR" in output:
-            return [
-                TextContent(
-                    type="text",
-                    text=f"Syntax errors found:\n\n{output}",
-                )
-            ]
-        else:
-            return [
-                TextContent(
-                    type="text",
-                    text="No obvious syntax errors detected.\n\n" + output,
-                )
-            ]
-
     elif name == "certify_book":
         file_path = arguments["file_path"]
         timeout = arguments.get("timeout")
@@ -2702,34 +2585,6 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             )
         ]
 
-    elif name == "admit":
-        code = arguments["code"]
-        timeout = arguments.get("timeout")
-        session_id = arguments.get("session_id")
-
-        if session_id:
-            session = session_manager.get_session(session_id)
-            if not session:
-                return [
-                    TextContent(
-                        type="text",
-                        text=f"Error: Session {session_id} not found",
-                    )
-                ]
-            output = await session.send_command(code, timeout)
-        else:
-            output = await run_acl2(code, timeout)
-
-        # Check if the event was admitted successfully
-        success = "Error" not in output and "FAILED" not in output
-
-        return [
-            TextContent(
-                type="text",
-                text=f"Admit {'succeeded' if success else 'failed'}:\n\n{output}",
-            )
-        ]
-
     elif name == "query_event":
         name_arg = arguments["name"]
         file_path = arguments.get("file_path", "")
@@ -2789,20 +2644,6 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             output = xdoc_corpus_show(topic_name, max_chars)
         except ValueError as e:
             output = f"Error: {e}"
-        return [
-            TextContent(
-                type="text",
-                text=output,
-            )
-        ]
-
-    elif name == "verify_guards":
-        function_name = arguments["function_name"]
-        file_path = arguments.get("file_path", "")
-        timeout = arguments.get("timeout")
-
-        output = await verify_function_guards(function_name, file_path, timeout)
-
         return [
             TextContent(
                 type="text",
