@@ -19,7 +19,6 @@ This document provides detailed reference documentation for all 21 tools provide
 - [File-based Tools](#file-based-tools)
   - [certify_book](#certify_book)
   - [include_book](#include_book)
-  - [check_theorem](#check_theorem)
 - [Query and Verification Tools](#query-and-verification-tools)
   - [query_event](#query_event)
   - [xdoc_search](#xdoc_search)
@@ -152,18 +151,6 @@ Load a certified ACL2 book to use its definitions and theorems. Use this to impo
 - `timeout` (optional): Timeout in seconds (optional, no timeout if not specified)
 - `session_id` (optional): Optional: ID of persistent session to use. If not provided, creates a fresh ACL2 session for this command only.
 - `use_system_dir` (optional): If true, use :dir :system for ACL2 system books (books in the ACL2 books directory). Default: false
-
----
-
-### check_theorem
-
-Verify a specific theorem from a file. Use this to re-check a single theorem after making changes, without re-proving everything in the file. The file is loaded first, then the named theorem is proven. File path INCLUDES .lisp extension.
-
-**Parameters:**
-
-- `file_path` (required): Full path to the .lisp file (WITH extension). Example: '/path/to/theorems.lisp'
-- `theorem_name` (required): Exact name of the theorem to check. Example: 'append-associative'
-- `timeout` (optional): Timeout in seconds (optional, no timeout if not specified)
 
 ---
 

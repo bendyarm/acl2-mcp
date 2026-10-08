@@ -32,7 +32,7 @@ When calling the MCP tools:
 
 - **Book paths** (e.g., `certify_book`, `include_book`): supply the path
   *without* the `.lisp` extension.
-- **Regular file paths** (e.g., `check_theorem`, `query_event`): supply
+- **Regular file paths** (e.g., `query_event`, `verify_guards`): supply
   the full path *with* the `.lisp` extension.
 
 ## ACL2 MCP startup

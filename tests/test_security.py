@@ -136,22 +136,3 @@ async def test_verify_guards_injection_protection() -> None:
     assert len(result) == 1
     assert "Error" in result[0].text
     assert "Invalid" in result[0].text
-
-
-@pytest.mark.asyncio
-async def test_check_theorem_injection_protection(tmp_path: Any) -> None:
-    """Test that check_theorem protects against code injection."""
-    # Create a valid file
-    test_file = tmp_path / "test.lisp"
-    test_file.write_text("(defthm test-thm (equal (+ 1 1) 2))")
-
-    malicious_theorem = 'test-thm")(+ 1 1)'
-
-    result = await call_tool(
-        "check_theorem",
-        {"file_path": str(test_file), "theorem_name": malicious_theorem},
-    )
-
-    assert len(result) == 1
-    assert "Error" in result[0].text
-    assert "Invalid" in result[0].text

@@ -1735,28 +1735,6 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
-            name="check_theorem",
-            description="Verify a specific theorem from a file. Use this to re-check a single theorem after making changes, without re-proving everything in the file. The file is loaded first, then the named theorem is proven. File path INCLUDES .lisp extension.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "file_path": {
-                        "type": "string",
-                        "description": "Full path to the .lisp file (WITH extension). Example: '/path/to/theorems.lisp'",
-                    },
-                    "theorem_name": {
-                        "type": "string",
-                        "description": "Exact name of the theorem to check. Example: 'append-associative'",
-                    },
-                    "timeout": {
-                        "type": "number",
-                        "description": "Timeout in seconds (optional, no timeout if not specified)",
-                    },
-                },
-                "required": ["file_path", "theorem_name"],
-            },
-        ),
-        Tool(
             name="admit",
             description="Test if an ACL2 event would be accepted WITHOUT saving it permanently. Use this to validate definitions/theorems before adding them to files. Faster than 'prove' for testing. Returns success/failure. Example use case: testing if a function definition is valid before committing to a file. Can optionally use a persistent session to test in context of existing definitions.",
             inputSchema={
@@ -2767,37 +2745,6 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             output = await session.send_command(code, timeout)
         else:
             output = await run_acl2(code, timeout)
-
-        return [
-            TextContent(
-                type="text",
-                text=output,
-            )
-        ]
-
-    elif name == "check_theorem":
-        file_path = arguments["file_path"]
-        theorem_name = arguments["theorem_name"]
-        timeout = arguments.get("timeout")
-
-        # Validate inputs
-        try:
-            abs_path = validate_file_path(file_path)
-            validated_theorem = validate_acl2_identifier(theorem_name)
-        except ValueError as e:
-            return [
-                TextContent(
-                    type="text",
-                    text=f"Error: {e}",
-                )
-            ]
-
-        # Escape the path and build code
-        escaped_path = escape_acl2_string(str(abs_path))
-
-        # First load the file, then try to prove the theorem by name
-        code = f'(ld "{escaped_path}")\n(thm (implies t ({validated_theorem})))'
-        output = await run_acl2(code, timeout)
 
         return [
             TextContent(

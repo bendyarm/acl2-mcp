@@ -33,7 +33,6 @@ All code-based tools support an optional `session_id` parameter for incremental 
 ### File-based Tools
 - **certify_book**: Certify an ACL2 book file (loads and verifies all definitions and theorems)
 - **include_book**: Load an ACL2 book and optionally evaluate additional code
-- **check_theorem**: Check a specific theorem in an ACL2 file by name
 
 ### Query and Verification Tools
 - **query_event**: Query information about a defined function, theorem, or event (uses :pe)
@@ -406,15 +405,6 @@ Tool: include_book
 Arguments:
   file_path: "arithmetic/top"
   use_system_dir: true
-```
-
-**Check a Specific Theorem:**
-```
-Tool: check_theorem
-Arguments:
-  file_path: "path/to/myfile.lisp"
-  theorem_name: "my-theorem-name"
-  timeout: 60  (optional)
 ```
 
 ### Query and Verification Tools

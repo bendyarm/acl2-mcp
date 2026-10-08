@@ -182,21 +182,6 @@ async def test_call_tool_include_book_nonexistent() -> None:
 
 
 @pytest.mark.asyncio
-async def test_call_tool_check_theorem_nonexistent() -> None:
-    """Test check_theorem with nonexistent file."""
-    arguments: dict[str, Any] = {
-        "file_path": "/tmp/nonexistent_acl2_file.lisp",
-        "theorem_name": "some-theorem",
-    }
-
-    result = await call_tool("check_theorem", arguments)
-
-    assert len(result) == 1
-    assert result[0].type == "text"
-    assert "not found" in result[0].text.lower()
-
-
-@pytest.mark.asyncio
 async def test_call_tool_admit_valid() -> None:
     """Test admit with valid ACL2 code."""
     arguments: dict[str, Any] = {
