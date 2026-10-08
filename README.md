@@ -41,7 +41,6 @@ All code-based tools support an optional `session_id` parameter for incremental 
 ### Session State Management Tools
 - **undo**: Undo the last N events in a session
 - **get_world_state**: Display current session state (recent definitions and theorems)
-- **retry_proof**: Retry a failed proof with different hints
 
 ## Prerequisites
 
@@ -293,15 +292,18 @@ Arguments:
   code: "(defthm plus-commutative (equal (plus x y) (plus y x)))"
 ```
 
-**5. If proof fails, retry with hints:**
+**5. If proof fails, resubmit with hints:**
 ```lisp
-Tool: retry_proof
+Tool: evaluate
 Arguments:
   session_id: "a1b2c3d4-..."
   code: "(defthm plus-commutative
           (equal (plus x y) (plus y x))
           :hints ((\"Goal\" :induct (plus x y))))"
 ```
+
+A failed `defthm` adds nothing to the session, so there is nothing to undo
+first.
 
 **6. Set a checkpoint before risky steps:**
 ```lisp

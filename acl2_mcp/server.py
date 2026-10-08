@@ -1882,28 +1882,6 @@ async def list_tools() -> list[Tool]:
                 "required": ["session_id"],
             },
         ),
-        Tool(
-            name="retry_proof",
-            description="Retry the last proof attempt in a session with different hints or strategies. This is useful for interactive proof debugging - when a proof fails, you can try again with modified hints without re-submitting the entire theorem. The previous failed proof attempt is undone first.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "session_id": {
-                        "type": "string",
-                        "description": "ID of the session with the failed proof",
-                    },
-                    "code": {
-                        "type": "string",
-                        "description": "New proof attempt with different hints. Example: (defthm my-thm (equal x y) :hints ((\"Goal\" :use (:instance lemma))))",
-                    },
-                    "timeout": {
-                        "type": "number",
-                        "description": "Timeout in seconds (optional, no timeout if not specified)",
-                    },
-                },
-                "required": ["session_id", "code"],
-            },
-        ),
     ]
 
 
@@ -2522,35 +2500,6 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             TextContent(
                 type="text",
                 text=f"World state (last {limit} events):\n\n{output}",
-            )
-        ]
-
-    elif name == "retry_proof":
-        session_id = arguments["session_id"]
-        code = arguments["code"]
-        timeout = arguments.get("timeout")
-
-        session = session_manager.get_session(session_id)
-        if not session:
-            return [
-                TextContent(
-                    type="text",
-                    text=f"Error: Session {session_id} not found",
-                )
-            ]
-
-        # Undo the last failed proof attempt
-        if session.event_counter > 0:
-            await session.send_command(f":ubt {session.event_counter - 1}")
-            session.event_counter -= 1
-
-        # Try the new proof
-        output = await session.send_command(code, timeout)
-
-        return [
-            TextContent(
-                type="text",
-                text=f"Retry proof result:\n\n{output}",
             )
         ]
 

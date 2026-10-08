@@ -235,31 +235,6 @@ async def test_get_world_state() -> None:
 
 
 @pytest.mark.asyncio
-async def test_retry_proof() -> None:
-    """Test retrying a proof with different hints."""
-    start_result = await call_tool("start_session", {})
-    session_id = extract_session_id(start_result[0].text)
-
-    # Try a simple theorem first
-    await call_tool("prove", {
-        "code": "(defthm simple-thm (equal (+ 1 1) 2))",
-        "session_id": session_id
-    })
-
-    # Retry with same theorem (this is just testing the mechanism)
-    retry_result = await call_tool("retry_proof", {
-        "session_id": session_id,
-        "code": "(defthm simple-thm2 (equal (+ 2 2) 4))"
-    })
-
-    assert len(retry_result) == 1
-    assert "Retry proof" in retry_result[0].text
-
-    # Cleanup
-    await call_tool("end_session", {"session_id": session_id})
-
-
-@pytest.mark.asyncio
 async def test_session_nonexistent_error() -> None:
     """Test that operations on nonexistent sessions fail gracefully."""
     result = await call_tool("undo", {

@@ -27,7 +27,6 @@ This document provides detailed reference documentation for all 21 tools provide
 - [Session State Management Tools](#session-state-management-tools)
   - [undo](#undo)
   - [get_world_state](#get_world_state)
-  - [retry_proof](#retry_proof)
 
 ---
 
@@ -225,18 +224,6 @@ Display the current ACL2 world state in a session, showing all definitions, theo
 
 - `session_id` (required): ID of the session
 - `limit` (optional): Maximum number of recent events to show (default: 20)
-
----
-
-### retry_proof
-
-Retry the last proof attempt in a session with different hints or strategies. This is useful for interactive proof debugging - when a proof fails, you can try again with modified hints without re-submitting the entire theorem. The previous failed proof attempt is undone first.
-
-**Parameters:**
-
-- `session_id` (required): ID of the session with the failed proof
-- `code` (required): New proof attempt with different hints. Example: (defthm my-thm (equal x y) :hints (("Goal" :use (:instance lemma))))
-- `timeout` (optional): Timeout in seconds (optional, no timeout if not specified)
 
 ---
 
