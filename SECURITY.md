@@ -49,11 +49,6 @@ The ACL2 MCP server executes arbitrary ACL2 code provided by the client. This is
 - Only alphanumeric, hyphens, underscores, and spaces
 - Prevents injection and display issues
 
-**Checkpoint Names** (`validate_checkpoint_name`):
-- Maximum 100 characters
-- Only alphanumeric, hyphens, and underscores
-- Prevents key collision attacks
-
 **Integer Parameters** (`validate_integer_parameter`):
 - Validates count, limit, and other integer inputs
 - Enforces reasonable bounds to prevent DoS
@@ -89,7 +84,6 @@ The ACL2 MCP server executes arbitrary ACL2 code provided by the client. This is
 
 **Resource Limits**:
 - Maximum 50 concurrent sessions server-wide
-- Maximum 50 checkpoints per session
 - Sessions auto-terminate after 30 minutes of inactivity
 
 **Timeout Protection**:
@@ -138,7 +132,6 @@ See `tests/test_security.py` for complete test coverage.
 
 **No Per-User Resource Limits**:
 - One user/client could consume all 50 session slots
-- No quotas on checkpoint creation beyond per-session limit
 - **Mitigation**: Suitable for single-user local deployment only
 
 **Stderr Not Monitored in Sessions**:
@@ -169,7 +162,6 @@ When reviewing changes to this codebase, verify:
 - [ ] File paths are validated with `validate_file_path()`
 - [ ] ACL2 identifiers are validated with `validate_acl2_identifier()`
 - [ ] Session names validated with `validate_session_name()`
-- [ ] Checkpoint names validated with `validate_checkpoint_name()`
 - [ ] Integer parameters validated with `validate_integer_parameter()`
 - [ ] Strings interpolated into ACL2 code are escaped with `escape_acl2_string()`
 - [ ] Timeouts are validated with `validate_timeout()`
@@ -177,6 +169,6 @@ When reviewing changes to this codebase, verify:
 - [ ] No direct string interpolation of user input into ACL2 commands
 - [ ] Error messages don't leak sensitive information (catch generic `Exception`)
 - [ ] Session operations use locks to prevent race conditions
-- [ ] Resource limits enforced (sessions, checkpoints, etc.)
+- [ ] Resource limits enforced (sessions, code length, etc.)
 - [ ] Timeout implementation is total, not per-line
 - [ ] New functionality has corresponding security tests

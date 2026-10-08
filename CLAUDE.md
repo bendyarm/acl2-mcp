@@ -57,7 +57,7 @@ Security validation (see `SECURITY.md`):
 - Input validation: code length (1MB max), timeout (1-300s), file paths, identifiers
 - Path traversal prevention: all paths resolved to absolute
 - Command injection prevention: ACL2 strings escaped, identifiers validated
-- DoS prevention: session limits, timeout enforcement, checkpoint limits
+- DoS prevention: session limits, timeout enforcement
 - No internal error details leaked to clients
 
 ## Development Commands

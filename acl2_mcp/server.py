@@ -34,8 +34,6 @@ MIN_TIMEOUT = 1
 MAX_CODE_LENGTH = 1_000_000  # 1MB of code
 SESSION_INACTIVITY_TIMEOUT = None  # Disabled by default - sessions don't auto-timeout
 MAX_SESSIONS = 50  # Maximum concurrent sessions
-MAX_CHECKPOINT_NAME_LENGTH = 100  # Maximum checkpoint name length
-MAX_CHECKPOINTS_PER_SESSION = 50  # Maximum checkpoints per session
 MAX_SESSION_NAME_LENGTH = 100  # Maximum session name length
 
 _DEBUG_LOG_PATH = Path.home() / ".acl2-mcp" / "debug.log"
@@ -253,32 +251,6 @@ def validate_file_path(file_path: str) -> Path:
     return abs_path
 
 
-def validate_checkpoint_name(name: str) -> str:
-    """
-    Validate checkpoint name for safety.
-
-    Args:
-        name: Checkpoint name to validate
-
-    Returns:
-        Validated checkpoint name
-
-    Raises:
-        ValueError: If name is invalid
-    """
-    if not name:
-        raise ValueError("Checkpoint name cannot be empty")
-
-    if len(name) > MAX_CHECKPOINT_NAME_LENGTH:
-        raise ValueError(f"Checkpoint name exceeds maximum length of {MAX_CHECKPOINT_NAME_LENGTH}")
-
-    # Only allow alphanumeric, hyphens, underscores
-    if not re.match(r'^[a-zA-Z0-9_-]+$', name):
-        raise ValueError("Checkpoint name can only contain letters, numbers, hyphens, and underscores")
-
-    return name
-
-
 def validate_session_name(name: str) -> str:
     """
     Validate session name for safety.
@@ -331,14 +303,6 @@ def validate_integer_parameter(value: int, min_value: int, max_value: int, name:
 
 
 @dataclass
-class SessionCheckpoint:
-    """Represents a saved checkpoint in an ACL2 session."""
-    name: str
-    event_number: int
-    timestamp: float
-
-
-@dataclass
 class ACL2Session:
     """
     Represents a persistent ACL2 session with background I/O handling via PTY.
@@ -359,7 +323,6 @@ class ACL2Session:
     process: asyncio.subprocess.Process
     created_at: float
     last_activity: float
-    checkpoints: dict[str, SessionCheckpoint] = field(default_factory=dict)
     event_counter: int = 0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     log_file: Optional[Path] = None
@@ -1923,42 +1886,6 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
-            name="save_checkpoint",
-            description="Save a named checkpoint of the current ACL2 world state in a session. You can later restore to this checkpoint to try alternative proof strategies. Use this before attempting risky proof steps or when you want to preserve a known-good state.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "session_id": {
-                        "type": "string",
-                        "description": "ID of the session",
-                    },
-                    "checkpoint_name": {
-                        "type": "string",
-                        "description": "Name for this checkpoint. Example: 'before-induction-proof'",
-                    },
-                },
-                "required": ["session_id", "checkpoint_name"],
-            },
-        ),
-        Tool(
-            name="restore_checkpoint",
-            description="Restore a session to a previously saved checkpoint. This undoes all events that occurred after the checkpoint was created. Use this to backtrack to a known-good state and try a different approach.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "session_id": {
-                        "type": "string",
-                        "description": "ID of the session",
-                    },
-                    "checkpoint_name": {
-                        "type": "string",
-                        "description": "Name of the checkpoint to restore",
-                    },
-                },
-                "required": ["session_id", "checkpoint_name"],
-            },
-        ),
-        Tool(
             name="get_world_state",
             description="Display the current ACL2 world state in a session, showing all definitions, theorems, and events. Use this to see what's currently defined in your session. Uses ACL2's :pbt (print-back-through) command.",
             inputSchema={
@@ -2580,98 +2507,6 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
                     f"Removed (listed oldest first):\n{removed}\n\n"
                     f"Most recent surviving command (from ACL2's undo output):\n{output}"
                 ),
-            )
-        ]
-
-    elif name == "save_checkpoint":
-        session_id = arguments["session_id"]
-        checkpoint_name = arguments["checkpoint_name"]
-
-        # SECURITY: Validate checkpoint name
-        try:
-            checkpoint_name = validate_checkpoint_name(checkpoint_name)
-        except ValueError as e:
-            return [
-                TextContent(
-                    type="text",
-                    text=f"Error: {e}",
-                )
-            ]
-
-        session = session_manager.get_session(session_id)
-        if not session:
-            return [
-                TextContent(
-                    type="text",
-                    text=f"Error: Session {session_id} not found",
-                )
-            ]
-
-        # SECURITY: Limit number of checkpoints per session
-        if len(session.checkpoints) >= MAX_CHECKPOINTS_PER_SESSION:
-            return [
-                TextContent(
-                    type="text",
-                    text=f"Error: Maximum number of checkpoints ({MAX_CHECKPOINTS_PER_SESSION}) reached for this session",
-                )
-            ]
-
-        new_checkpoint = SessionCheckpoint(
-            name=checkpoint_name,
-            event_number=session.event_counter,
-            timestamp=time.time(),
-        )
-        session.checkpoints[checkpoint_name] = new_checkpoint
-
-        return [
-            TextContent(
-                type="text",
-                text=f"Checkpoint '{checkpoint_name}' saved at event {session.event_counter}",
-            )
-        ]
-
-    elif name == "restore_checkpoint":
-        session_id = arguments["session_id"]
-        checkpoint_name = arguments["checkpoint_name"]
-
-        # SECURITY: Validate checkpoint name
-        try:
-            checkpoint_name = validate_checkpoint_name(checkpoint_name)
-        except ValueError as e:
-            return [
-                TextContent(
-                    type="text",
-                    text=f"Error: {e}",
-                )
-            ]
-
-        session = session_manager.get_session(session_id)
-        if not session:
-            return [
-                TextContent(
-                    type="text",
-                    text=f"Error: Session {session_id} not found",
-                )
-            ]
-
-        checkpoint: Optional[SessionCheckpoint] = session.checkpoints.get(checkpoint_name)
-        if checkpoint is None:
-            available = ", ".join(session.checkpoints.keys()) if session.checkpoints else "none"
-            return [
-                TextContent(
-                    type="text",
-                    text=f"Error: Checkpoint '{checkpoint_name}' not found. Available: {available}",
-                )
-            ]
-
-        # Restore to checkpoint by undoing to that event number
-        output = await session.send_command(f":ubt {checkpoint.event_number}")
-        session.event_counter = checkpoint.event_number
-
-        return [
-            TextContent(
-                type="text",
-                text=f"Restored to checkpoint '{checkpoint_name}' (event {checkpoint.event_number}):\n\n{output}",
             )
         ]
 

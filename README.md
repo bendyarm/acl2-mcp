@@ -41,8 +41,6 @@ All code-based tools support an optional `session_id` parameter for incremental 
 
 ### Session State Management Tools
 - **undo**: Undo the last N events in a session
-- **save_checkpoint**: Save a named checkpoint of the current session state
-- **restore_checkpoint**: Restore a session to a previously saved checkpoint
 - **get_world_state**: Display current session state (recent definitions and theorems)
 - **retry_proof**: Retry a failed proof with different hints
 
@@ -306,21 +304,24 @@ Arguments:
           :hints ((\"Goal\" :induct (plus x y))))"
 ```
 
-**6. Save checkpoints before risky steps:**
+**6. Set a checkpoint before risky steps:**
 ```lisp
-Tool: save_checkpoint
+Tool: evaluate
 Arguments:
   session_id: "a1b2c3d4-..."
-  checkpoint_name: "before-induction"
+  code: "(deflabel before-induction)"
 ```
 
-**7. Restore if needed:**
+**7. Return to the checkpoint if needed:**
 ```lisp
-Tool: restore_checkpoint
+Tool: evaluate
 Arguments:
   session_id: "a1b2c3d4-..."
-  checkpoint_name: "before-induction"
+  code: ":ubu before-induction"
 ```
+
+`:ubu` undoes everything after the label and keeps the label, so you can
+return to it again.  See the `acl2-session-history-management` skill.
 
 **8. Inspect session state:**
 ```lisp
@@ -351,7 +352,7 @@ Arguments:
 - ✅ Test functions immediately after defining them
 - ✅ Build complex proofs incrementally
 - ✅ Try different proof strategies without re-submitting entire files
-- ✅ Save/restore checkpoints for experimentation
+- ✅ Set checkpoints (`deflabel`) and return to them (`:ubu`) while experimenting
 - ⚡ Sessions auto-timeout after 30 minutes of inactivity
 
 ### Code-based Tools

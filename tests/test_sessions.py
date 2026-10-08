@@ -11,10 +11,10 @@ Pre-existing failures in other test files (not in this file):
   "not found" but make returns "No rule to make target".
 
 Terminal window cleanup note (2026-04-05):
-The last ~6 tests (test_max_sessions_limit, test_eof_detection,
-test_broken_pipe_on_terminate, test_broken_pipe_on_send_command,
-test_restore_nonexistent_checkpoint, test_checkpoint_limit_per_session)
-leave Terminal log viewer windows open after the test run.  These tests
+The last 4 tests (test_broken_pipe_on_send_command,
+test_broken_pipe_on_terminate, test_cleanup_all_with_dead_sessions,
+test_eof_detection) leave 6 Terminal log viewer windows open after the
+test run.  These tests
 kill ACL2 processes directly or leave sessions uncleaned, bypassing
 end_session which is where close_log_viewer is called.  This is a test
 cleanup issue, not a production concern.
@@ -28,7 +28,6 @@ import pytest
 from acl2_mcp.server import (
     call_tool,
     session_manager,
-    validate_checkpoint_name,
     validate_session_name,
     validate_integer_parameter,
 )
@@ -211,46 +210,6 @@ async def test_undo() -> None:
 
 
 @pytest.mark.asyncio
-async def test_save_and_restore_checkpoint() -> None:
-    """Test saving and restoring checkpoints."""
-    start_result = await call_tool("start_session", {})
-    session_id = extract_session_id(start_result[0].text)
-
-    # Add an event
-    await call_tool("evaluate", {
-        "code": "(defun func1 (x) x)",
-        "session_id": session_id
-    })
-
-    # Save checkpoint
-    save_result = await call_tool("save_checkpoint", {
-        "session_id": session_id,
-        "checkpoint_name": "after-func1"
-    })
-
-    assert len(save_result) == 1
-    assert "saved" in save_result[0].text.lower()
-
-    # Add another event
-    await call_tool("evaluate", {
-        "code": "(defun func2 (x) x)",
-        "session_id": session_id
-    })
-
-    # Restore to checkpoint
-    restore_result = await call_tool("restore_checkpoint", {
-        "session_id": session_id,
-        "checkpoint_name": "after-func1"
-    })
-
-    assert len(restore_result) == 1
-    assert "Restored" in restore_result[0].text
-
-    # Cleanup
-    await call_tool("end_session", {"session_id": session_id})
-
-
-@pytest.mark.asyncio
 async def test_get_world_state() -> None:
     """Test getting world state from a session."""
     start_result = await call_tool("start_session", {})
@@ -313,32 +272,6 @@ async def test_session_nonexistent_error() -> None:
 
 
 # Security and Validation Tests
-
-
-def test_validate_checkpoint_name_valid() -> None:
-    """Test that valid checkpoint names are accepted."""
-    assert validate_checkpoint_name("my-checkpoint") == "my-checkpoint"
-    assert validate_checkpoint_name("checkpoint_123") == "checkpoint_123"
-    assert validate_checkpoint_name("TEST-POINT") == "TEST-POINT"
-
-
-def test_validate_checkpoint_name_rejects_invalid() -> None:
-    """Test that invalid checkpoint names are rejected."""
-    with pytest.raises(ValueError, match="only contain"):
-        validate_checkpoint_name("bad checkpoint")  # spaces not allowed
-
-    with pytest.raises(ValueError, match="only contain"):
-        validate_checkpoint_name("bad@checkpoint")  # special chars not allowed
-
-    with pytest.raises(ValueError, match="cannot be empty"):
-        validate_checkpoint_name("")
-
-
-def test_validate_checkpoint_name_rejects_long() -> None:
-    """Test that long checkpoint names are rejected."""
-    long_name = "a" * 101
-    with pytest.raises(ValueError, match="exceeds maximum length"):
-        validate_checkpoint_name(long_name)
 
 
 def test_validate_session_name_valid() -> None:
@@ -415,29 +348,6 @@ async def test_session_code_length_limit() -> None:
 
 
 @pytest.mark.asyncio
-async def test_checkpoint_limit_per_session() -> None:
-    """Test that checkpoint limit per session is enforced."""
-    start_result = await call_tool("start_session", {})
-    session_id = extract_session_id(start_result[0].text)
-
-    # Try to create 51 checkpoints (max is 50)
-    for i in range(51):
-        result = await call_tool("save_checkpoint", {
-            "session_id": session_id,
-            "checkpoint_name": f"checkpoint-{i}"
-        })
-
-        if i < 50:
-            assert "saved" in result[0].text.lower()
-        else:
-            # 51st should fail
-            assert "Maximum number of checkpoints" in result[0].text
-
-    # Cleanup
-    await call_tool("end_session", {"session_id": session_id})
-
-
-@pytest.mark.asyncio
 async def test_invalid_session_name() -> None:
     """Test that invalid session names are rejected."""
     result = await call_tool("start_session", {
@@ -446,24 +356,6 @@ async def test_invalid_session_name() -> None:
 
     assert len(result) == 1
     assert "Invalid session name" in result[0].text
-
-
-@pytest.mark.asyncio
-async def test_invalid_checkpoint_name() -> None:
-    """Test that invalid checkpoint names are rejected."""
-    start_result = await call_tool("start_session", {})
-    session_id = extract_session_id(start_result[0].text)
-
-    result = await call_tool("save_checkpoint", {
-        "session_id": session_id,
-        "checkpoint_name": "bad checkpoint name"  # spaces not allowed
-    })
-
-    assert len(result) == 1
-    assert "Error" in result[0].text
-
-    # Cleanup
-    await call_tool("end_session", {"session_id": session_id})
 
 
 @pytest.mark.asyncio
@@ -499,25 +391,6 @@ async def test_get_world_state_limit_validation() -> None:
 
     assert len(result) == 1
     assert "must be between" in result[0].text
-
-    # Cleanup
-    await call_tool("end_session", {"session_id": session_id})
-
-
-@pytest.mark.asyncio
-async def test_restore_nonexistent_checkpoint() -> None:
-    """Test restoring a checkpoint that doesn't exist."""
-    start_result = await call_tool("start_session", {})
-    session_id = extract_session_id(start_result[0].text)
-
-    result = await call_tool("restore_checkpoint", {
-        "session_id": session_id,
-        "checkpoint_name": "nonexistent"
-    })
-
-    assert len(result) == 1
-    assert "not found" in result[0].text
-    assert "Available:" in result[0].text
 
     # Cleanup
     await call_tool("end_session", {"session_id": session_id})

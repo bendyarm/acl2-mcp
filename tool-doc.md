@@ -27,8 +27,6 @@ This document provides detailed reference documentation for all 21 tools provide
   - [verify_guards](#verify_guards)
 - [Session State Management Tools](#session-state-management-tools)
   - [undo](#undo)
-  - [save_checkpoint](#save_checkpoint)
-  - [restore_checkpoint](#restore_checkpoint)
   - [get_world_state](#get_world_state)
   - [retry_proof](#retry_proof)
 
@@ -232,28 +230,6 @@ Undo the last ACL2 event in a persistent session. This removes the most recent d
 
 ---
 
-### save_checkpoint
-
-Save a named checkpoint of the current ACL2 world state in a session. You can later restore to this checkpoint to try alternative proof strategies. Use this before attempting risky proof steps or when you want to preserve a known-good state.
-
-**Parameters:**
-
-- `session_id` (required): ID of the session
-- `checkpoint_name` (required): Name for this checkpoint. Example: 'before-induction-proof'
-
----
-
-### restore_checkpoint
-
-Restore a session to a previously saved checkpoint. This undoes all events that occurred after the checkpoint was created. Use this to backtrack to a known-good state and try a different approach.
-
-**Parameters:**
-
-- `session_id` (required): ID of the session
-- `checkpoint_name` (required): Name of the checkpoint to restore
-
----
-
 ### get_world_state
 
 Display the current ACL2 world state in a session, showing all definitions, theorems, and events. Use this to see what's currently defined in your session. Uses ACL2's :pbt (print-back-through) command.
@@ -284,7 +260,6 @@ Retry the last proof attempt in a session with different hints or strategies. Th
 - Maximum of 50 concurrent sessions server-wide
 - Each session maintains its own ACL2 world state
 - Sessions are isolated from each other
-- Maximum of 50 checkpoints per session
 
 ### Timeouts
 - All timeouts are clamped to the range 1-300 seconds (5 minutes max)
@@ -295,9 +270,6 @@ Retry the last proof attempt in a session with different hints or strategies. Th
 - **Maximum code length**: 1MB (1,000,000 characters) per request
 - **Session names**: Alphanumeric characters, hyphens, underscores, and spaces allowed
   - Validated with pattern: `^[a-zA-Z0-9_\- ]+$`
-- **Checkpoint names**: Alphanumeric characters, hyphens, and underscores only (no spaces)
-  - Maximum length: 100 characters
-  - Validated with pattern: `^[a-zA-Z0-9_-]+$`
 - **File paths**: Must exist and be files (not directories) when required
 
 ### Execution Modes
