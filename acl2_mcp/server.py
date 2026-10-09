@@ -4,6 +4,7 @@ import aiofiles
 import asyncio
 import errno
 import fcntl
+import functools
 import os
 import platform
 import pty
@@ -298,6 +299,9 @@ class ACL2Session:
     # Shutdown coordination
     shutdown_event: asyncio.Event = field(default_factory=asyncio.Event)
     _end_marker_written: bool = False
+    # Closes the session log's viewer; set when one is opened (see
+    # SessionManager.log_viewer_opened), called once when the session ends
+    close_viewer: Optional[Callable[[], None]] = field(default=None, repr=False)
 
     async def send_command(self, command: str, timeout: int | None = None) -> str:
         """
@@ -701,6 +705,16 @@ class ACL2Session:
                 pass
         self.reader_registered = False
 
+    def _close_viewer(self) -> None:
+        """Close the session log's viewer, if one is open.
+
+        Called when ACL2 exits (_handle_pty_eof) and when the session is
+        ended (terminate), whichever comes first.
+        """
+        close, self.close_viewer = self.close_viewer, None
+        if close is not None:
+            close()
+
     async def _process_pty_chunk(self, chunk: bytes) -> None:
         """
         Process a chunk of data from the PTY.
@@ -890,6 +904,7 @@ class ACL2Session:
             print(f"Error handling PTY EOF: {e}", file=sys.stderr)
         finally:
             self.shutdown_event.set()
+            self._close_viewer()
 
     async def _handle_pty_error(self, error: Exception) -> None:
         """Handle errors from PTY reader."""
@@ -1050,6 +1065,8 @@ class ACL2Session:
                         task.cancel()
                     # Wait for cancellation to complete
                     await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+
+            self._close_viewer()
 
 
 def _session_window_title(session_id: str) -> str:
@@ -1213,6 +1230,8 @@ def close_log_viewer(
     running processes?" dialog), then closes the window by its custom title.
     Silently does nothing if the window or process doesn't exist.
     """
+    if viewer == "none":
+        return
     if viewer == "emacs":
         if log_file:
             _emacsclient_eval(f'(acl2-mcp-close-log "{_elisp_escape(str(log_file))}")')
@@ -1445,6 +1464,7 @@ class SessionManager:
                     log_file, log_tail_lines, session_id,
                     viewer=self.config.session_log.viewer,
                 )
+                self.log_viewer_opened(session)
 
             self.sessions[session_id] = session
 
@@ -1475,18 +1495,19 @@ class SessionManager:
         if not session:
             return f"Error: Session {session_id} not found"
 
-        # terminate() logs the SESSION ENDED marker
+        # terminate() logs the SESSION ENDED marker and closes the log viewer
         await session.terminate()
         del self.sessions[session_id]
 
-        # Close the log viewer if configured
-        if self.config.session_log.close_log_on_end:
-            close_log_viewer(
-                session_id, session.log_file,
-                viewer=self.config.session_log.viewer,
-            )
-
         return f"Session {session_id} ended successfully"
+
+    def log_viewer_opened(self, session: ACL2Session) -> None:
+        """Note that a viewer shows SESSION's log, so that it is closed when
+        the session ends (if close_log_on_end is set)."""
+        if self.config.session_log.close_log_on_end:
+            session.close_viewer = functools.partial(
+                close_log_viewer, session.session_id, session.log_file,
+                viewer=self.config.session_log.viewer)
 
     async def interrupt_session(self, session_id: str) -> str:
         """
@@ -2137,6 +2158,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             session.log_file, log_tail_lines, session_id,
             viewer=session_manager.config.session_log.viewer,
         )
+        session_manager.log_viewer_opened(session)
         return [
             TextContent(
                 type="text",
@@ -2301,25 +2323,28 @@ async def run() -> None:
     """Run the server."""
     # MCP clients stop a server by closing its input, then sending SIGTERM
     # if it hasn't exited (it waits for tool calls still running, such as a
-    # long certification).  SIGTERM's default action would kill it at once,
-    # skipping the cleanup and leaving certifications running.  Instead,
-    # cancel the running tool calls, clean up, and exit.  The cleanup runs
-    # in a task of its own because run() may never get to its finally: if
-    # stdin is still open, the MCP library's thread reading it stays
-    # blocked in read(), and the library waits for that thread.
+    # long certification).  A client running in a terminal starts the
+    # server in its own process group, so when the terminal goes away (a
+    # closed window, a killed tmux pane) the server gets SIGHUP as well.
+    # The default action of either signal would kill it at once, skipping
+    # the cleanup and leaving certifications running.  Instead, cancel the
+    # running tool calls, clean up, and exit.  The cleanup runs in a task
+    # of its own because run() may never get to its finally: if stdin is
+    # still open, the MCP library's thread reading it stays blocked in
+    # read(), and the library waits for that thread.
     main_task = asyncio.current_task()
     cleaning_up = False
     exit_tasks: list["asyncio.Task[None]"] = []
 
     async def clean_up() -> None:
-        await session_manager.cleanup_all()
-        await stop_all_certifications()
+        await asyncio.gather(session_manager.cleanup_all(),
+                             stop_all_certifications())
 
     async def clean_up_and_exit() -> None:
         await clean_up()
         os._exit(0)
 
-    def on_sigterm() -> None:
+    def on_signal() -> None:
         nonlocal cleaning_up
         if cleaning_up:
             return  # the server is already shutting down
@@ -2328,7 +2353,8 @@ async def run() -> None:
             main_task.cancel()
         exit_tasks.append(asyncio.create_task(clean_up_and_exit()))
 
-    asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, on_sigterm)
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        asyncio.get_running_loop().add_signal_handler(sig, on_signal)
     try:
         async with stdio_server() as (read_stream, write_stream):
             await app.run(
@@ -2342,7 +2368,8 @@ async def run() -> None:
             cleaning_up = True
             await clean_up()
         elif exit_tasks:
-            # After SIGTERM: let its cleanup finish (it exits the process)
+            # After SIGTERM or SIGHUP: let its cleanup finish (it exits the
+            # process)
             await exit_tasks[0]
 
 

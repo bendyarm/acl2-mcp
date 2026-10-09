@@ -162,8 +162,9 @@ Currently supported settings:
 # Set to false to suppress the automatic terminal window.
 # view_log_in_terminal = true
 
-# If true (the default), close the session log Terminal window when
-# the session ends.  Set to false to keep it open for review.
+# If true (the default), close the session log viewer when the session
+# ends: by end_session, by ACL2 exiting, or by acl2-mcp exiting.  Set to
+# false to keep it open for review.
 # close_log_on_end = true
 
 # Which viewer opens the session log when a session starts:

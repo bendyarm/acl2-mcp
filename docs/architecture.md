@@ -231,12 +231,19 @@ input on macOS but ACL2's pending output on Linux.
 4. Remove event loop reader
 5. Close PTY master
 6. Clean up buffers and tasks
+7. Close the log viewer, if `close_log_on_end` is set
 
 The reader stays registered until ACL2 has exited, so that its last
 output is logged and its exit can't hang: on macOS, the exit of the
 session leader (the `acl2` process) waits until its terminal output has
 been read.  The reader also removes itself when it reads EOF or EIO,
 since the master stays readable after ACL2's side closes.
+
+A session also ends when ACL2 exits on its own (after `(good-bye)` or a
+crash): the reader's EOF or EIO logs the `SESSION ENDED` marker and
+closes the log viewer.  The viewer is closed once, whichever comes
+first; `log_viewer_opened` arranges it when `start_session` or
+`show_session_log` opens one.
 
 ## Book Certification
 
@@ -254,12 +261,16 @@ keep its output pipe open.
 ## Server Shutdown
 
 An MCP client stops a stdio server by closing its stdin, then sending
-SIGTERM if it hasn't exited, then SIGKILL.  On stdin EOF the MCP library
-waits for running tool calls to finish before `run()` returns and cleans
-up (ends all sessions, stops all certifications).  On SIGTERM, `run()`
-cancels the running tool calls, cleans up in a task of its own, and exits
-with `os._exit(0)`: if stdin is still open, the library's thread reading
-it stays blocked in `read()`, and the process would not otherwise exit.
+SIGTERM if it hasn't exited, then SIGKILL.  A client running in a
+terminal (Claude Code, say) starts the server in its own process group,
+which gets SIGHUP when the terminal goes away: a closed Terminal window,
+a killed tmux pane or session.  On stdin EOF the MCP library waits for
+running tool calls to finish before `run()` returns and cleans up (ends
+all sessions, closing their log viewers, and stops all certifications).
+On SIGTERM or SIGHUP, `run()` cancels the running tool calls, cleans up
+in a task of its own, and exits with `os._exit(0)`: if stdin is still
+open, the library's thread reading it stays blocked in `read()`, and
+the process would not otherwise exit.
 
 ## Platform Notes
 

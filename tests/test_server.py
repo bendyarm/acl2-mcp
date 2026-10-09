@@ -1,7 +1,10 @@
 """Tests for the ACL2 MCP server."""
 
 import asyncio
+import os
+import signal
 import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -10,6 +13,9 @@ from typing import Any
 import pytest
 
 from acl2_mcp.server import call_tool, list_tools, xdoc_corpus_show
+
+sys.path.insert(0, str(Path(__file__).parents[1] / "for-agents"))
+from mcp_stdio_client import MCP  # noqa: E402
 
 
 @pytest.mark.asyncio
@@ -158,6 +164,56 @@ async def test_certify_book_cancel_stops_everything(
     assert not cert_jobs_running(name)
     await asyncio.sleep(2)
     assert not (tmp_path / f"{name}.cert").exists()
+
+
+def test_sighup_ends_sessions_and_certifications(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """On SIGHUP the server ends its sessions and stops its certifications
+    before exiting, as on SIGTERM.
+
+    A client running in a terminal starts the server in its own process
+    group, so closing that terminal (or killing its tmux pane) sends the
+    server SIGHUP.  That used to kill the server at once: cert.pl went on
+    to certify the book, and the session log never got SESSION ENDED.
+    """
+    monkeypatch.chdir(tmp_path)  # cert.pl writes Makefile-tmp here
+    name = slow_book(tmp_path)
+    mcp = MCP([sys.executable, "-m", "acl2_mcp.server"])
+    try:
+        mcp.initialize()
+        session_id = mcp.start_session()
+        acl2 = int(subprocess.run(["pgrep", "-P", str(mcp.p.pid)],
+                                  capture_output=True, text=True).stdout.split()[0])
+        mcp.id += 1  # certify_book, without waiting for its reply
+        mcp._send({"jsonrpc": "2.0", "id": mcp.id, "method": "tools/call",
+                   "params": {"name": "certify_book", "arguments": {
+                       "file_path": str(tmp_path / name), "jobs": 1}}})
+        # Wait for the script that runs ACL2 on the book (cert.pl itself
+        # soon execs make, whose command line doesn't name the book)
+        for _ in range(100):
+            if cert_jobs_running(f"workxxx.{name}"):
+                break
+            time.sleep(0.1)
+        assert cert_jobs_running(f"workxxx.{name}")
+
+        os.kill(mcp.p.pid, signal.SIGHUP)
+        assert mcp.p.wait(timeout=30) == 0
+        assert not cert_jobs_running(name)
+        for _ in range(50):  # the session's ACL2 is gone
+            try:
+                os.killpg(acl2, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+        else:
+            pytest.fail("the session's ACL2 is still running")
+        log = next((Path.home() / ".acl2-mcp" / "sessions").glob(f"{session_id}-*.log"))
+        assert "SESSION ENDED" in log.read_text()
+        time.sleep(2)
+        assert not (tmp_path / f"{name}.cert").exists()
+    finally:
+        if mcp.p.poll() is None:
+            mcp.p.kill()
 
 
 @pytest.fixture

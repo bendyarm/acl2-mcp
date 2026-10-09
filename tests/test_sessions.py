@@ -10,14 +10,12 @@ Pre-existing failures in other test files (not in this file):
 - test_server.py::test_call_tool_certify_book_nonexistent: Test expects
   "not found" but make returns "No rule to make target".
 
-Terminal window cleanup note (2026-04-05):
-The last 4 tests (test_broken_pipe_on_send_command,
-test_broken_pipe_on_terminate, test_cleanup_all_with_dead_sessions,
-test_eof_detection) leave 6 Terminal log viewer windows open after the
-test run.  These tests
-kill ACL2 processes directly or leave sessions uncleaned, bypassing
-end_session which is where close_log_viewer is called.  This is a test
-cleanup issue, not a production concern.
+Terminal window cleanup note:
+test_eof_detection fails before it ends its session, leaving its log
+viewer window open.  test_cleanup_all_with_dead_sessions usually leaves
+one open too: its sessions end within a second of starting, and the
+Terminal viewer's close (which kills the window's tail process) can run
+before the window's shell has started tail.
 """
 
 import asyncio
@@ -27,6 +25,8 @@ from typing import Any
 
 import pytest
 
+from acl2_mcp import server
+from acl2_mcp.config import ServerConfig, SessionLogConfig
 from acl2_mcp.server import (
     call_tool,
     session_manager,
@@ -485,6 +485,63 @@ async def test_reader_stops_when_acl2_exits(session_id: str) -> None:
             break
         await asyncio.sleep(0.1)
     assert not session.reader_registered
+
+
+@pytest.fixture
+def emacs_viewer(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Use the Emacs log viewer, recording the forms for emacsclient
+    instead of sending them."""
+    forms: list[str] = []
+    monkeypatch.setattr(server, "_emacsclient_eval", forms.append)
+    monkeypatch.setattr(session_manager, "config", ServerConfig(
+        session_log=SessionLogConfig(viewer="emacs")))
+    return forms
+
+
+def viewer_closes(forms: list[str]) -> int:
+    return sum(form.startswith("(acl2-mcp-close-log ") for form in forms)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["end_session", "ACL2 exits", "server exits"])
+async def test_log_viewer_closed_when_session_ends(
+        emacs_viewer: list[str], ending: str) -> None:
+    """A session's log viewer is closed once, however the session ends.
+
+    Only end_session used to close it, so a session whose ACL2 exited, or
+    that was still running when the server exited, left its viewer open.
+    """
+    result = await call_tool("start_session", {})
+    session_id = extract_session_id(result[0].text)
+    assert emacs_viewer[0].startswith("(acl2-mcp-show-log ")
+    assert viewer_closes(emacs_viewer) == 0
+
+    if ending == "end_session":
+        await call_tool("end_session", {"session_id": session_id})
+    elif ending == "ACL2 exits":
+        await call_tool("evaluate", {
+            "session_id": session_id, "timeout": 10, "code": "(good-bye)"})
+        for _ in range(50):
+            if viewer_closes(emacs_viewer):
+                break
+            await asyncio.sleep(0.1)
+        assert viewer_closes(emacs_viewer) == 1
+        await call_tool("end_session", {"session_id": session_id})
+    else:
+        await session_manager.cleanup_all()
+    assert viewer_closes(emacs_viewer) == 1
+
+
+@pytest.mark.asyncio
+async def test_log_viewer_shown_later_closed_when_session_ends(
+        emacs_viewer: list[str]) -> None:
+    """A viewer opened by show_session_log is closed when the session ends."""
+    result = await call_tool("start_session", {"view_log_in_terminal": False})
+    session_id = extract_session_id(result[0].text)
+    assert emacs_viewer == []
+    await call_tool("show_session_log", {"session_id": session_id})
+    await call_tool("end_session", {"session_id": session_id})
+    assert viewer_closes(emacs_viewer) == 1
 
 
 @pytest.mark.asyncio
