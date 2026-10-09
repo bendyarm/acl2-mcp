@@ -286,9 +286,9 @@ async def test_interrupt_with_full_input_queue(session_id: str) -> None:
 
     While ACL2 sleeps, a command bigger than the PTY input queue (about
     1 KB on macOS, 20 KB on Linux) fills it, leaving no room to write
-    Ctrl-C.  The interrupt must fall back to SIGINT and discard the unread
-    input, so that none of the queued forms run and no partial form is
-    left to swallow the next command.
+    Ctrl-C.  The interrupt must discard the unread input, so that there is
+    room for Ctrl-C (it used to fall back to SIGINT), none of the queued
+    forms run, and no partial form is left to swallow the next command.
     """
     code = "(sleep 10)\n" + "(value-triple :padding)\n" * 2000
     # evaluate waits for ACL2 to read the rest; interrupt meanwhile.
@@ -297,7 +297,7 @@ async def test_interrupt_with_full_input_queue(session_id: str) -> None:
     await asyncio.sleep(1)
 
     result = await call_tool("interrupt_session", {"session_id": session_id})
-    assert "SIGINT (fallback)" in result[0].text
+    assert "Interrupt signal sent via PTY" in result[0].text
 
     result = await evaluation
     assert "interrupted before the whole command was sent" in result[0].text
@@ -407,6 +407,37 @@ async def test_interrupt_stops_sending_rest_of_command(
     log = session.log_file.read_text()
     assert "INPUT CUT SHORT" in log
     assert ":LAST-FORM-DONE" not in log
+
+
+@pytest.mark.asyncio
+async def test_interrupt_while_rest_of_command_unread(session_id: str) -> None:
+    """Interrupt works at once while ACL2 is busy with an early form and
+    the rest of the command is queued, unread.
+
+    The command fits in the PTY input queue, so it is sent in full, but
+    ACL2 reads only part of it before starting the first form.  On Linux
+    the terminal acts on a byte only once the input ahead of it is read,
+    so a Ctrl-C written behind the rest of the command used to wait until
+    ACL2 had finished the form and read the rest.
+    """
+    # Let ACL2 finish starting up (an acl2-customization file loads after
+    # the first prompt, which start_session takes as the end of startup)
+    result = await call_tool("evaluate", {
+        "session_id": session_id, "code": "(+ 1000 337)", "timeout": 30})
+    assert "1337" in result[0].text
+
+    code = "(sleep 30)\n" + FILLER[:16000] + "(value-triple :last-form-done)"
+    evaluation = asyncio.create_task(call_tool("evaluate", {
+        "session_id": session_id, "code": code, "timeout": 60}))
+    await asyncio.sleep(1)
+
+    start = time.monotonic()
+    result = await call_tool("interrupt_session", {"session_id": session_id})
+    assert "Interrupt signal sent" in result[0].text
+    result = await evaluation
+    assert time.monotonic() - start < 10
+    assert "ABORTING" in result[0].text
+    assert ":LAST-FORM-DONE" not in result[0].text
 
 
 async def process_group_exits(pgid: int, timeout: float = 5.0) -> bool:

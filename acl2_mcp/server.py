@@ -564,8 +564,9 @@ class ACL2Session:
         This mimics a user pressing Ctrl-C in a terminal. The PTY's controlling
         terminal setup ensures the interrupt is delivered correctly to ACL2/SBCL.
 
-        If the Ctrl-C cannot be written, do what the terminal would do with
-        it: discard ACL2's unread input and send SIGINT to the process group.
+        ACL2's unread input is discarded first, as the Ctrl-C would discard
+        it anyway.  If the Ctrl-C still cannot be written, send SIGINT to
+        the process group.
 
         Returns:
             Status message indicating success or failure
@@ -581,17 +582,18 @@ class ACL2Session:
             # rest must not follow the interrupt.
             self.interrupt_count += 1
 
+            # On Linux the terminal acts on an input byte only once the
+            # input ahead of it has been read, so a Ctrl-C behind unread
+            # input would wait until ACL2 had finished its current form and
+            # read the rest.  Discarding that input first also makes room
+            # for the Ctrl-C when the input queue is full.
+            self._flush_pty_input()
+
             # Primary method: Send Ctrl-C (0x03) through the PTY
             # This is how a terminal delivers interrupts - the line discipline
             # converts it to SIGINT for the foreground process group
             try:
-                loop = asyncio.get_event_loop()
-                await loop.run_in_executor(
-                    None,
-                    os.write,
-                    self.master_fd,
-                    b"\x03"  # Ctrl-C
-                )
+                os.write(self.master_fd, b"\x03")  # non-blocking fd
 
                 # Log the interrupt in the session
                 timestamp = time.monotonic()
@@ -603,14 +605,11 @@ class ACL2Session:
                 return "Interrupt signal sent via PTY"
 
             except OSError:
-                # PTY write failed, try fallback method.  The usual cause
-                # is EAGAIN: ACL2 is busy, and the input queue is full of a
-                # command it has not read yet, leaving no room for Ctrl-C.
+                # PTY write failed (say, the flush failed and the input
+                # queue is still full); try fallback method
                 pass
 
-            # Fallback method: Send SIGINT to the process group, after
-            # discarding the unread input, as the terminal does for Ctrl-C
-            self._flush_pty_input()
+            # Fallback method: Send SIGINT to the process group
             try:
                 # Get the process group ID and send SIGINT
                 pgid = os.getpgid(self.process.pid)

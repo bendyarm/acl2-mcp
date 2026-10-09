@@ -180,26 +180,37 @@ while the write is still waiting, and must not end the command.
 
 ## Interrupt Handling
 
-Interrupts are sent via PTY (preferred) with SIGINT fallback:
+Interrupts discard ACL2's unread input, then send Ctrl-C via the PTY,
+with a SIGINT fallback:
 
 ```python
+# Discard input ACL2 hasn't read yet
+self._flush_pty_input()
+
 # Primary: Send Ctrl-C through PTY
 os.write(self.master_fd, b"\x03")
 
-# Fallback: discard unread input, then send SIGINT to process group
-self._flush_pty_input()
+# Fallback: send SIGINT to process group
 pgid = os.getpgid(self.process.pid)
 os.killpg(pgid, signal.SIGINT)
 ```
 
-The PTY method is preferred because it matches terminal behavior exactly:
-the line discipline discards ACL2's unread input and sends SIGINT.  The
-fallback does the same two steps itself.  It is needed when the Ctrl-C
-cannot be written, usually because ACL2 is busy and the input queue is
-full of a command it has not read yet (EAGAIN; the queue holds about 1 KB
-on macOS and 20 KB on Linux).  The flush opens the slave by name
-(`slave_path`), because a `tcflush` through the master fd discards the
-input on macOS but ACL2's pending output on Linux.
+Sending Ctrl-C matches terminal behavior exactly: the line discipline
+discards ACL2's unread input and sends SIGINT.  Discarding the input
+first matters in two cases where ACL2 is busy with an early form of a
+long command and the rest is queued, unread:
+
+- On Linux, the line discipline acts on an input byte only once the
+  input ahead of it has been read.  A Ctrl-C written behind the rest of
+  the command waits until ACL2 has finished the form and read the rest:
+  `interrupt_session` reports success, but nothing is interrupted.
+- When the input queue is full (about 1 KB on macOS, 20 KB on Linux),
+  there is no room to write the Ctrl-C (EAGAIN).
+
+The flush opens the slave by name (`slave_path`), because a `tcflush`
+through the master fd discards the input on macOS but ACL2's pending
+output on Linux.  The fallback is for a Ctrl-C that still can't be
+written.
 
 ## Session Lifecycle
 
