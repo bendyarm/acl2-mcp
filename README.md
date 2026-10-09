@@ -26,7 +26,7 @@ This MCP server exposes 15 tools for working with ACL2, including support for pe
 - **prove**: Submit ACL2 theorems (defthm) for proof
 - **evaluate**: Evaluate arbitrary ACL2 expressions and definitions
 
-All code-based tools support an optional `session_id` parameter for incremental development.
+All code-based tools require a `session_id` from `start_session`.
 
 ### File-based Tools
 - **certify_book**: Certify an ACL2 book file (loads and verifies all definitions and theorems)
@@ -386,6 +386,7 @@ Arguments:
 ```
 Tool: include_book
 Arguments:
+  session_id: "a1b2c3d4-..."
   file_path: "path/to/mybook"  (without .lisp extension)
   code: "(thm (equal (+ 1 1) 2))"  (optional)
   timeout: 60  (optional)
@@ -396,6 +397,7 @@ For system books (books in the ACL2 books directory), set `use_system_dir: true`
 ```
 Tool: include_book
 Arguments:
+  session_id: "a1b2c3d4-..."
   file_path: "arithmetic/top"
   use_system_dir: true
 ```
@@ -406,8 +408,8 @@ Arguments:
 ```
 Tool: query_event
 Arguments:
+  session_id: "a1b2c3d4-..."
   name: "append"
-  file_path: "path/to/file.lisp"  (optional, if function is in a file)
   timeout: 30  (optional)
 
 Returns the definition and properties of the named event.
@@ -431,22 +433,15 @@ mypy acl2_mcp/
 
 ## How It Works
 
-The server supports two execution modes:
-
-### Persistent Sessions (Preferred)
-When using sessions:
+Every tool that runs ACL2 code runs it in a persistent session:
 1. `start_session` creates a long-running ACL2 process using a PTY
 2. Each tool call sends commands to the existing process and reads responses
 3. The ACL2 world state accumulates across multiple commands
 4. Sessions auto-cleanup after 30 minutes of inactivity or when explicitly ended
 5. Up to 50 concurrent sessions are supported
 
-### One-off Execution
-Rarely used; mainly for testing ACL2 startup file handling. When no `session_id` is provided:
-1. Writes ACL2 code to a temporary `.lisp` file
-2. Starts a fresh ACL2 process with the code as input
-3. Captures and returns stdout/stderr
-4. Cleans up the temporary file and terminates ACL2
+For a throwaway experiment in a clean ACL2 world, start a second session
+and end it when you are done.
 
 Default timeout is 30 seconds per command, configurable per request.
 

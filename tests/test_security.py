@@ -104,22 +104,13 @@ def test_validate_file_path_accepts_valid_file(tmp_path: Any) -> None:
 
 
 @pytest.mark.asyncio
-async def test_code_length_limit() -> None:
-    """Test that extremely long code is rejected."""
-    long_code = "a" * 2_000_000  # 2MB of code
-
-    result = await call_tool("evaluate", {"code": long_code})
-
-    assert len(result) == 1
-    assert "exceeds maximum length" in result[0].text
-
-
-@pytest.mark.asyncio
-async def test_query_event_injection_protection() -> None:
+async def test_query_event_injection_protection(session_id: str) -> None:
     """Test that query_event protects against code injection."""
     malicious_name = 'append")(+ 1 1)'
 
-    result = await call_tool("query_event", {"name": malicious_name})
+    result = await call_tool(
+        "query_event", {"name": malicious_name, "session_id": session_id}
+    )
 
     assert len(result) == 1
     assert "Error" in result[0].text

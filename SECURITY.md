@@ -40,7 +40,7 @@ The ACL2 MCP server executes arbitrary ACL2 code provided by the client. This is
 - Handles invalid types gracefully
 
 **Code Length**:
-- Maximum 1MB of code per request (both one-off and session modes)
+- Maximum 1MB of code per request
 - Applied to all code submission tools
 - Prevents resource exhaustion
 
@@ -77,7 +77,6 @@ The ACL2 MCP server executes arbitrary ACL2 code provided by the client. This is
 
 - ACL2 runs as separate subprocess
 - Timeout enforcement with process termination
-- Temporary files cleaned up after execution
 - stdin/stdout/stderr properly captured
 
 ### 5. Session Security
@@ -89,7 +88,7 @@ The ACL2 MCP server executes arbitrary ACL2 code provided by the client. This is
 **Timeout Protection**:
 - True total timeout (not per-line) prevents slow-read attacks
 - Cryptographically random markers prevent injection
-- Timeout applies to both one-off and session commands
+- Timeout applies to every session command
 
 **Concurrency Protection**:
 - Per-session locks prevent concurrent access
@@ -133,11 +132,6 @@ See `tests/test_security.py` for complete test coverage.
 **No Per-User Resource Limits**:
 - One user/client could consume all 50 session slots
 - **Mitigation**: Suitable for single-user local deployment only
-
-**Stderr Not Monitored in Sessions**:
-- stderr buffer could fill and cause process blocking
-- Error information may be lost
-- **Mitigation**: Use one-off execution for critical operations
 
 ## Best Practices for Deployment
 

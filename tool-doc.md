@@ -78,25 +78,25 @@ Send SIGINT (Ctrl-C) to interrupt a running ACL2 command in a session. Use this 
 
 ### prove
 
-Submit an ACL2 theorem (defthm) for proof. Use this to prove mathematical properties. Example: (defthm append-nil (implies (true-listp x) (equal (append x nil) x))). The theorem will be proven and added to the ACL2 world. Returns detailed ACL2 proof output. Can optionally use a persistent session for incremental development.
+Submit an ACL2 theorem (defthm) for proof. Use this to prove mathematical properties. Example: (defthm append-nil (implies (true-listp x) (equal (append x nil) x))). The theorem will be proven and added to the ACL2 world. Returns detailed ACL2 proof output.
 
 **Parameters:**
 
 - `code` (required): ACL2 code to prove (e.g., defthm form)
 - `timeout` (optional): Timeout in seconds (optional, no timeout if not specified)
-- `session_id` (optional): Optional: ID of persistent session to use. If not provided, creates a fresh ACL2 session for this command only.
+- `session_id` (required): ID of the session to use
 
 ---
 
 ### evaluate
 
-Evaluate ACL2 expressions or define functions (defun). Use this for: 1) Defining functions, 2) Computing values, 3) Testing expressions. Example: (defun factorial (n) (if (zp n) 1 (* n (factorial (- n 1))))) or (+ 1 2). Returns the ACL2 evaluation result. Can optionally use a persistent session for incremental development.
+Evaluate ACL2 expressions or define functions (defun). Use this for: 1) Defining functions, 2) Computing values, 3) Testing expressions. Example: (defun factorial (n) (if (zp n) 1 (* n (factorial (- n 1))))) or (+ 1 2). Returns the ACL2 evaluation result.
 
 **Parameters:**
 
 - `code` (required): ACL2 code to evaluate
 - `timeout` (optional): Timeout in seconds (optional, no timeout if not specified)
-- `session_id` (optional): Optional: ID of persistent session to use. If not provided, creates a fresh ACL2 session for this command only.
+- `session_id` (required): ID of the session to use
 
 ---
 
@@ -123,7 +123,7 @@ Load a certified ACL2 book to use its definitions and theorems. Use this to impo
 - `file_path` (required): Path to the book WITHOUT .lisp extension. Example: 'std/lists/append' for ACL2 standard library, or 'arithmetic/top' for system books
 - `code` (optional): Optional ACL2 code to run after loading the book. Example: (thm (equal (+ 1 1) 2))
 - `timeout` (optional): Timeout in seconds (optional, no timeout if not specified)
-- `session_id` (optional): Optional: ID of persistent session to use. If not provided, creates a fresh ACL2 session for this command only.
+- `session_id` (required): ID of the session to use
 - `use_system_dir` (optional): If true, use :dir :system for ACL2 system books (books in the ACL2 books directory). Default: false
 
 ---
@@ -132,13 +132,12 @@ Load a certified ACL2 book to use its definitions and theorems. Use this to impo
 
 ### query_event
 
-Look up the definition and properties of an ACL2 function, theorem, or macro. Use this to understand what's already defined before writing new code, or to check the signature of existing functions. Works with built-in ACL2 functions (e.g., 'append', 'len') or user-defined ones. Uses ACL2's :pe (print-event) command. To query something defined in a persistent session, pass session_id; without it, the query runs in a fresh ACL2 that knows nothing about any session.
+Look up the definition and properties of an ACL2 function, theorem, or macro. Use this to understand what's already defined before writing new code, or to check the signature of existing functions. Works with built-in ACL2 functions (e.g., 'append', 'len') or user-defined ones. Uses ACL2's :pe (print-event) command.
 
 **Parameters:**
 
 - `name` (required): Name of function/theorem to query. Examples: 'append', 'len', 'my-custom-function'
-- `file_path` (optional): Optional: Load this file first (WITH .lisp extension) before querying. Use if the event is defined in a specific file. Not compatible with session_id.
-- `session_id` (optional): Optional: ID of persistent session to query in. Required to see events defined in that session.
+- `session_id` (required): ID of the session to query in
 - `timeout` (optional): Timeout in seconds (optional, no timeout if not specified)
 
 ---
@@ -209,21 +208,14 @@ Display the current ACL2 world state in a session, showing all definitions, theo
   - Validated with pattern: `^[a-zA-Z0-9_\- ]+$`
 - **File paths**: Must exist and be files (not directories) when required
 
-### Execution Modes
+### Execution
 
-**Session Execution** (with session_id) - Preferred:
+Every tool that runs ACL2 code runs it in a session:
 - Uses existing ACL2 process via PTY
 - Maintains state across commands
 - Much faster for repeated operations (no startup cost)
 - Enables incremental development workflow
-- Use for building up definitions and theorems incrementally
-
-**One-off Execution** (no session_id):
-- Rarely used; mainly for testing ACL2 startup file handling
-- Creates fresh ACL2 process for each command
-- Executes code in clean environment
-- Returns output
-- Terminates ACL2 process after completion
+- For a throwaway experiment in a clean world, start a second session and end it afterwards
 
 ### Background I/O and Logging
 

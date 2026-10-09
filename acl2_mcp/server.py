@@ -13,7 +13,6 @@ import signal
 import struct
 import subprocess
 import sys
-import tempfile
 import termios
 import time
 import uuid
@@ -1625,7 +1624,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="prove",
-            description="Submit an ACL2 theorem (defthm) for proof. Use this to prove mathematical properties. Example: (defthm append-nil (implies (true-listp x) (equal (append x nil) x))). The theorem will be proven and added to the ACL2 world. Returns detailed ACL2 proof output. Can optionally use a persistent session for incremental development.",
+            description="Submit an ACL2 theorem (defthm) for proof. Use this to prove mathematical properties. Example: (defthm append-nil (implies (true-listp x) (equal (append x nil) x))). The theorem will be proven and added to the ACL2 world. Returns detailed ACL2 proof output.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1639,15 +1638,15 @@ async def list_tools() -> list[Tool]:
                     },
                     "session_id": {
                         "type": "string",
-                        "description": "Optional: ID of persistent session to use. If not provided, creates a fresh ACL2 session for this command only.",
+                        "description": "ID of the session to use",
                     },
                 },
-                "required": ["code"],
+                "required": ["code", "session_id"],
             },
         ),
         Tool(
             name="evaluate",
-            description="Evaluate ACL2 expressions or define functions (defun). Use this for: 1) Defining functions, 2) Computing values, 3) Testing expressions. Example: (defun factorial (n) (if (zp n) 1 (* n (factorial (- n 1))))) or (+ 1 2). Returns the ACL2 evaluation result. Can optionally use a persistent session for incremental development.",
+            description="Evaluate ACL2 expressions or define functions (defun). Use this for: 1) Defining functions, 2) Computing values, 3) Testing expressions. Example: (defun factorial (n) (if (zp n) 1 (* n (factorial (- n 1))))) or (+ 1 2). Returns the ACL2 evaluation result.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1661,10 +1660,10 @@ async def list_tools() -> list[Tool]:
                     },
                     "session_id": {
                         "type": "string",
-                        "description": "Optional: ID of persistent session to use. If not provided, creates a fresh ACL2 session for this command only.",
+                        "description": "ID of the session to use",
                     },
                 },
-                "required": ["code"],
+                "required": ["code", "session_id"],
             },
         ),
         Tool(
@@ -1709,7 +1708,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "session_id": {
                         "type": "string",
-                        "description": "Optional: ID of persistent session to use. If not provided, creates a fresh ACL2 session for this command only.",
+                        "description": "ID of the session to use",
                     },
                     "use_system_dir": {
                         "type": "boolean",
@@ -1717,12 +1716,12 @@ async def list_tools() -> list[Tool]:
                         "default": False,
                     },
                 },
-                "required": ["file_path"],
+                "required": ["file_path", "session_id"],
             },
         ),
         Tool(
             name="query_event",
-            description="Look up the definition and properties of an ACL2 function, theorem, or macro. Use this to understand what's already defined before writing new code, or to check the signature of existing functions. Works with built-in ACL2 functions (e.g., 'append', 'len') or user-defined ones. Uses ACL2's :pe (print-event) command. To query something defined in a persistent session, pass session_id; without it, the query runs in a fresh ACL2 that knows nothing about any session.",
+            description="Look up the definition and properties of an ACL2 function, theorem, or macro. Use this to understand what's already defined before writing new code, or to check the signature of existing functions. Works with built-in ACL2 functions (e.g., 'append', 'len') or user-defined ones. Uses ACL2's :pe (print-event) command.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1730,20 +1729,16 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Name of function/theorem to query. Examples: 'append', 'len', 'my-custom-function'",
                     },
-                    "file_path": {
-                        "type": "string",
-                        "description": "Optional: Load this file first (WITH .lisp extension) before querying. Use if the event is defined in a specific file. Not compatible with session_id.",
-                    },
                     "session_id": {
                         "type": "string",
-                        "description": "Optional: ID of persistent session to query in. Required to see events defined in that session.",
+                        "description": "ID of the session to query in",
                     },
                     "timeout": {
                         "type": "number",
                         "description": "Timeout in seconds (optional, no timeout if not specified)",
                     },
                 },
-                "required": ["name"],
+                "required": ["name", "session_id"],
             },
         ),
         Tool(
@@ -1825,91 +1820,6 @@ async def list_tools() -> list[Tool]:
             },
         ),
     ]
-
-
-async def run_acl2(code: str, timeout: int | None = None) -> str:
-    """
-    Run ACL2 code and return the output.
-
-    Args:
-        code: ACL2 code to execute
-        timeout: Timeout in seconds, or None for no timeout
-
-    Returns:
-        Output from ACL2
-    """
-    # Validate inputs
-    if len(code) > MAX_CODE_LENGTH:
-        return f"Error: Code exceeds maximum length of {MAX_CODE_LENGTH} characters"
-
-    validated_timeout = validate_timeout(timeout)
-
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".lisp", delete=False
-    ) as f:
-        f.write(code)
-        f.write("\n(good-bye)\n")  # Exit ACL2
-        temp_file = f.name
-
-    try:
-        process = await asyncio.create_subprocess_exec(
-            "acl2",
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-
-        # Read the temp file and send to ACL2
-        with open(temp_file, "r") as f:
-            input_data = f.read()
-
-        try:
-            if validated_timeout is None:
-                # No timeout
-                stdout, stderr = await process.communicate(input=input_data.encode())
-            else:
-                stdout, stderr = await asyncio.wait_for(
-                    process.communicate(input=input_data.encode()),
-                    timeout=validated_timeout
-                )
-        except asyncio.TimeoutError:
-            process.kill()
-            await process.wait()
-            return f"Error: ACL2 execution timed out after {validated_timeout} seconds"
-
-        output = stdout.decode()
-        if stderr:
-            error_output = stderr.decode()
-            if error_output.strip():
-                output += f"\n\nStderr:\n{error_output}"
-
-        return output
-    finally:
-        Path(temp_file).unlink(missing_ok=True)
-
-
-async def run_acl2_file(file_path: str, timeout: int | None = None) -> str:
-    """
-    Run ACL2 with a file using ld (load).
-
-    Args:
-        file_path: Path to the ACL2 file
-        timeout: Timeout in seconds, or None for no timeout
-
-    Returns:
-        Output from ACL2
-    """
-    try:
-        abs_path = validate_file_path(file_path)
-    except ValueError as e:
-        return f"Error: {e}"
-
-    # Escape the path for safe use in ACL2 code
-    escaped_path = escape_acl2_string(str(abs_path))
-
-    # Use ld to load the file
-    code = f'(ld "{escaped_path}")'
-    return await run_acl2(code, timeout)
 
 
 async def certify_acl2_book(
@@ -2046,61 +1956,6 @@ def build_include_book_command(file_path: str, additional_code: str = "", use_sy
         code += f"\n{additional_code}"
 
     return code, ""
-
-
-async def include_acl2_book(file_path: str, additional_code: str = "", timeout: int | None = None, use_system_dir: bool = False) -> str:
-    """
-    Include an ACL2 book and optionally run additional code.
-
-    Args:
-        file_path: Path to the book (without .lisp extension)
-        additional_code: Optional code to run after including
-        timeout: Timeout in seconds, or None for no timeout
-        use_system_dir: If True, use :dir :system for ACL2 system books
-
-    Returns:
-        Output from ACL2
-    """
-    code, error = build_include_book_command(file_path, additional_code, use_system_dir)
-    if error:
-        return error
-
-    return await run_acl2(code, timeout)
-
-
-async def query_acl2_event(name: str, file_path: str = "", timeout: int | None = None) -> str:
-    """
-    Query information about an ACL2 event (function, theorem, etc.).
-
-    Args:
-        name: Name of the event to query
-        file_path: Optional file to load first
-        timeout: Timeout in seconds, or None for no timeout
-
-    Returns:
-        Output from ACL2 showing the event definition and properties
-    """
-    # Validate the event name
-    try:
-        validated_name = validate_acl2_identifier(name)
-    except ValueError as e:
-        return f"Error: {e}"
-
-    # Build code to load file (if provided) and query the event
-    code = ""
-    if file_path:
-        try:
-            abs_path = validate_file_path(file_path)
-        except ValueError as e:
-            return f"Error: {e}"
-
-        escaped_path = escape_acl2_string(str(abs_path))
-        code += f'(ld "{escaped_path}")\n'
-
-    # Use :pe (print event) to show the definition
-    code += f":pe {validated_name}"
-
-    return await run_acl2(code, timeout)
 
 
 # ---------------------------------------------------------------------------
@@ -2413,20 +2268,17 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
     elif name == "prove":
         code = arguments["code"]
         timeout = arguments.get("timeout")
-        session_id = arguments.get("session_id")
+        session_id = arguments["session_id"]
 
-        if session_id:
-            session = session_manager.get_session(session_id)
-            if not session:
-                return [
-                    TextContent(
-                        type="text",
-                        text=f"Error: Session {session_id} not found",
-                    )
-                ]
-            output = await session.send_command(code, timeout)
-        else:
-            output = await run_acl2(code, timeout)
+        session = session_manager.get_session(session_id)
+        if not session:
+            return [
+                TextContent(
+                    type="text",
+                    text=f"Error: Session {session_id} not found",
+                )
+            ]
+        output = await session.send_command(code, timeout)
 
         return [
             TextContent(
@@ -2438,20 +2290,17 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
     elif name == "evaluate":
         code = arguments["code"]
         timeout = arguments.get("timeout")
-        session_id = arguments.get("session_id")
+        session_id = arguments["session_id"]
 
-        if session_id:
-            session = session_manager.get_session(session_id)
-            if not session:
-                return [
-                    TextContent(
-                        type="text",
-                        text=f"Error: Session {session_id} not found",
-                    )
-                ]
-            output = await session.send_command(code, timeout)
-        else:
-            output = await run_acl2(code, timeout)
+        session = session_manager.get_session(session_id)
+        if not session:
+            return [
+                TextContent(
+                    type="text",
+                    text=f"Error: Session {session_id} not found",
+                )
+            ]
+        output = await session.send_command(code, timeout)
 
         return [
             TextContent(
@@ -2552,10 +2401,9 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
         file_path = arguments["file_path"]
         additional_code = arguments.get("code", "")
         timeout = arguments.get("timeout")
-        session_id = arguments.get("session_id")
+        session_id = arguments["session_id"]
         use_system_dir = arguments.get("use_system_dir", False)
 
-        # Build the command (same logic for both session and non-session)
         code, error = build_include_book_command(file_path, additional_code, use_system_dir)
         if error:
             return [
@@ -2565,18 +2413,15 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
                 )
             ]
 
-        if session_id:
-            session = session_manager.get_session(session_id)
-            if not session:
-                return [
-                    TextContent(
-                        type="text",
-                        text=f"Error: Session {session_id} not found",
-                    )
-                ]
-            output = await session.send_command(code, timeout)
-        else:
-            output = await run_acl2(code, timeout)
+        session = session_manager.get_session(session_id)
+        if not session:
+            return [
+                TextContent(
+                    type="text",
+                    text=f"Error: Session {session_id} not found",
+                )
+            ]
+        output = await session.send_command(code, timeout)
 
         return [
             TextContent(
@@ -2587,33 +2432,22 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
 
     elif name == "query_event":
         name_arg = arguments["name"]
-        file_path = arguments.get("file_path", "")
-        session_id = arguments.get("session_id")
+        session_id = arguments["session_id"]
         timeout = arguments.get("timeout")
 
-        if session_id:
-            if file_path:
-                return [
-                    TextContent(
-                        type="text",
-                        text="Error: file_path cannot be combined with session_id; use include_book or evaluate to load the file into the session first.",
-                    )
-                ]
-            try:
-                validated_name = validate_acl2_identifier(name_arg)
-            except ValueError as e:
-                return [TextContent(type="text", text=f"Error: {e}")]
-            session = session_manager.get_session(session_id)
-            if not session:
-                return [
-                    TextContent(
-                        type="text",
-                        text=f"Error: Session {session_id} not found",
-                    )
-                ]
-            output = await session.send_command(f":pe {validated_name}", timeout)
-        else:
-            output = await query_acl2_event(name_arg, file_path, timeout)
+        try:
+            validated_name = validate_acl2_identifier(name_arg)
+        except ValueError as e:
+            return [TextContent(type="text", text=f"Error: {e}")]
+        session = session_manager.get_session(session_id)
+        if not session:
+            return [
+                TextContent(
+                    type="text",
+                    text=f"Error: Session {session_id} not found",
+                )
+            ]
+        output = await session.send_command(f":pe {validated_name}", timeout)
 
         return [
             TextContent(

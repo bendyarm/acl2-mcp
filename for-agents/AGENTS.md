@@ -11,8 +11,8 @@ the recommended way to drive ACL2.
 ## Default workflow
 
 For interactive ACL2 work, follow the steps in the **acl2-session-start**
-skill below rather than relying on one-off tool calls. Sessions let you
-build up definitions and theorems incrementally and keep ACL2's world
+skill below. Every tool that runs ACL2 code needs a session; sessions let
+you build up definitions and theorems incrementally and keep ACL2's world
 state intact across commands.
 
 ## Looking things up
@@ -28,12 +28,8 @@ speculative work and return to it, follow the
 
 ## File path conventions
 
-When calling the MCP tools:
-
-- **Book paths** (e.g., `certify_book`, `include_book`): supply the path
-  *without* the `.lisp` extension.
-- **Regular file paths** (e.g., `query_event`): supply
-  the full path *with* the `.lisp` extension.
+When calling the MCP tools, supply book paths (e.g., `certify_book`,
+`include_book`) *without* the `.lisp` extension.
 
 ## ACL2 MCP startup
 
@@ -436,6 +432,23 @@ Log file: /Users/user/.acl2-mcp/sessions/abc123-20260405-110632.log
 - You can have multiple sessions active simultaneously
 - The session ID is required for all subsequent ACL2 operations in that session
 
+#### Scratch Sessions
+
+For a throwaway experiment in a clean ACL2 world (for example, trying a
+macro or checking what a book defines without touching your working
+session), start a separate scratch session:
+
+1. `mcp__acl2__start_session` with `name: "scratch"`, and the same `cwd` as
+   your working session if relative paths matter
+2. Run the experiment with `mcp__acl2__evaluate`, passing the scratch
+   session's ID
+3. `mcp__acl2__end_session` on the scratch session as soon as you are done
+
+Keep using the working session's ID for everything else; the two worlds are
+independent.  To try something on top of your current world instead, set a
+`deflabel` checkpoint in the working session and return to it with `:ubu`
+(see the acl2-session-history-management skill).
+
 #### Session Lifecycle - Don't End Sessions Unnecessarily
 
 **Important**: When something goes wrong (timeout, error, proof failure), the session is usually fine and can continue to be used. Do NOT end the session just because of an error.
@@ -455,6 +468,7 @@ Log file: /Users/user/.acl2-mcp/sessions/abc123-20260405-110632.log
 - You're completely done with ACL2 work
 - You need to start fresh with a clean ACL2 state
 - The session process has actually crashed (not just timed out)
+- You're done with a scratch session (see Scratch Sessions above)
 
 **On timeout**: Check the session log (`tail -20 <log-file>`) to see if ACL2 actually responded. A timeout often means the MCP server missed the prompt, not that ACL2 is stuck. You can usually just continue with the next command.
 

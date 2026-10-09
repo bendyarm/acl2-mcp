@@ -12,7 +12,7 @@ same content for Claude Code.
 
 ## Project Overview
 
-This is an MCP (Model Context Protocol) server that provides tools for interacting with the ACL2 theorem prover. The server enables AI assistants to work with ACL2 through persistent sessions for incremental development (preferred), or one-off execution for special cases.
+This is an MCP (Model Context Protocol) server that provides tools for interacting with the ACL2 theorem prover. The server enables AI assistants to work with ACL2 through persistent sessions for incremental development.
 
 ## Architecture
 
@@ -20,25 +20,22 @@ This is an MCP (Model Context Protocol) server that provides tools for interacti
 
 - **[acl2_mcp/server.py](acl2_mcp/server.py)**: Main server implementation containing:
   - Tool definitions and handlers (`list_tools()`, `call_tool()`)
-  - ACL2 execution functions (`run_acl2()`, `run_acl2_file()`)
+  - Book certification (`certify_acl2_book()`, which runs `cert.pl`)
   - Session management (`SessionManager`, `ACL2Session`)
   - Security validation functions (timeout, file path, identifiers, etc.)
 
-### Execution Modes
+### Sessions
 
-1. **Persistent sessions** (preferred): Long-running ACL2 processes for incremental work
-   - Managed by `SessionManager` (singleton: `session_manager`)
-   - Uses PTY for bidirectional communication (see `docs/architecture.md` for architecture)
-   - Sessions maintain ACL2 world state across commands
-   - Auto-cleanup after 30 minutes inactivity
-   - Max 50 concurrent sessions
+Every tool that runs ACL2 code runs it in a persistent session, a
+long-running ACL2 process:
+- Managed by `SessionManager` (singleton: `session_manager`)
+- Uses PTY for bidirectional communication (see `docs/architecture.md` for architecture)
+- Sessions maintain ACL2 world state across commands
+- Auto-cleanup after 30 minutes inactivity
+- Max 50 concurrent sessions
 
-2. **One-off execution**: Each tool call creates a fresh ACL2 process
-   - Rarely used; mainly for testing ACL2 startup file handling
-   - Code written to temp `.lisp` file
-   - ACL2 process started with code as input
-   - Output captured and returned
-   - Resources cleaned up
+For a throwaway clean world, a client starts a separate session and ends
+it afterwards.
 
 ### Session Communication
 
@@ -117,7 +114,7 @@ When adding/modifying tools:
 2. Add handler in `call_tool()`:
    - Extract and validate all arguments
    - Use appropriate validation functions
-   - Use session if `session_id` provided (preferred), otherwise one-off execution
+   - Tools that run ACL2 code take a required `session_id` (enforced by a test)
    - Return `Sequence[TextContent]` (usually single-element list)
 
 3. For session commands:
@@ -132,5 +129,4 @@ When adding/modifying tools:
 - **Strict typing**: `mypy --strict` enforced in CI/development
 - **File path conventions**:
   - Books: WITHOUT `.lisp` extension (certify_book, include_book)
-  - Regular files: WITH `.lisp` extension (query_event)
 - **Async throughout**: All I/O operations use asyncio
