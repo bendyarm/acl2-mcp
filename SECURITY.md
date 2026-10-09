@@ -29,11 +29,6 @@ The ACL2 MCP server executes arbitrary ACL2 code provided by the client. This is
 
 ### 1. Input Validation
 
-**ACL2 Identifiers** (`validate_acl2_identifier`):
-- Rejects identifiers containing quotes (`"`, `'`)
-- Rejects identifiers containing parentheses (`(`, `)`)
-- Prevents code injection through function/theorem names
-
 **Timeout Values** (`validate_timeout`):
 - Clamps to range: 1-300 seconds
 - Prevents negative or extreme values
@@ -50,36 +45,16 @@ The ACL2 MCP server executes arbitrary ACL2 code provided by the client. This is
 - Prevents injection and display issues
 
 **Integer Parameters** (`validate_integer_parameter`):
-- Validates count, limit, and other integer inputs
+- Validates bounded integer inputs (e.g. `max_results`, `max_chars`)
 - Enforces reasonable bounds to prevent DoS
 
-### 2. String Escaping
-
-**File Paths** (`escape_acl2_string`):
-- Escapes backslashes and quotes in file paths
-- Prevents breaking out of ACL2 string literals
-- Applied to all file paths passed to ACL2
-
-### 3. File Path Validation
-
-**Path Validation** (`validate_file_path`):
-- Resolves to absolute paths
-- Verifies file exists
-- Verifies path is a file (not a directory)
-- Error messages only expose filename, not full path
-
-**Current Limitations:**
-- Does not restrict access to specific directories
-- Allows reading any file the process can access
-- Suitable for local single-user usage only
-
-### 4. Process Isolation
+### 2. Process Isolation
 
 - ACL2 runs as separate subprocess
 - Timeout enforcement with process termination
 - stdin/stdout/stderr properly captured
 
-### 5. Session Security
+### 3. Session Security
 
 **Resource Limits**:
 - Maximum 50 concurrent sessions server-wide
@@ -95,23 +70,19 @@ The ACL2 MCP server executes arbitrary ACL2 code provided by the client. This is
 - Race-condition-safe cleanup with session snapshots
 - Safe shutdown handles all active sessions
 
-### 6. Error Handling
+### 4. Error Handling
 
 - Generic error messages to avoid information disclosure
 - No stack traces exposed to client
-- File paths in errors show basename only
 - Internal exceptions sanitized before returning to user
 
 ## Tested Attack Vectors
 
 The following attack vectors have been tested and mitigated:
 
-1. **Code Injection via Identifiers**: `name='append")(+ 1 1)'`
-2. **Code Injection via Paths**: `path='test")(malicious-code)'`
-3. **Resource Exhaustion**: 2MB code, 1000 second timeout
-4. **Path Traversal**: Non-existent files, directories
+1. **Resource Exhaustion**: 2MB code, 1000 second timeout
 
-See `tests/test_security.py` for complete test coverage.
+See `tests/test_security.py` and `tests/test_sessions.py`.
 
 ## Known Limitations and Risks
 
@@ -153,11 +124,8 @@ If you discover a security vulnerability, please report it by opening an issue o
 When reviewing changes to this codebase, verify:
 
 - [ ] All user inputs are validated before use
-- [ ] File paths are validated with `validate_file_path()`
-- [ ] ACL2 identifiers are validated with `validate_acl2_identifier()`
 - [ ] Session names validated with `validate_session_name()`
 - [ ] Integer parameters validated with `validate_integer_parameter()`
-- [ ] Strings interpolated into ACL2 code are escaped with `escape_acl2_string()`
 - [ ] Timeouts are validated with `validate_timeout()`
 - [ ] Code length checked against `MAX_CODE_LENGTH` (including sessions)
 - [ ] No direct string interpolation of user input into ACL2 commands

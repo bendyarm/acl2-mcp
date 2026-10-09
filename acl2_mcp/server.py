@@ -182,74 +182,6 @@ def detect_optimal_jobs() -> tuple[int | None, str]:
         return None, f"Unable to detect system load: {e}"
 
 
-def validate_acl2_identifier(identifier: str) -> str:
-    """
-    Validate that a string is a safe ACL2 identifier.
-
-    Args:
-        identifier: The identifier to validate
-
-    Returns:
-        The validated identifier
-
-    Raises:
-        ValueError: If identifier is not safe
-    """
-    if not identifier:
-        raise ValueError("Identifier cannot be empty")
-
-    # ACL2 identifiers can contain letters, digits, hyphens, underscores
-    # and some special characters, but should not contain quotes or parens
-    if '"' in identifier or "'" in identifier or "(" in identifier or ")" in identifier:
-        raise ValueError(f"Invalid ACL2 identifier: {identifier}")
-
-    return identifier
-
-
-def escape_acl2_string(s: str) -> str:
-    """
-    Escape a string for safe use in ACL2 code.
-
-    Args:
-        s: String to escape
-
-    Returns:
-        Escaped string safe for use in ACL2
-    """
-    # Escape backslashes first, then quotes
-    return s.replace("\\", "\\\\").replace('"', '\\"')
-
-
-def validate_file_path(file_path: str) -> Path:
-    """
-    Validate file path and check it exists.
-
-    Args:
-        file_path: Path to validate
-
-    Returns:
-        Resolved absolute path
-
-    Raises:
-        ValueError: If path is invalid or doesn't exist
-    """
-    if not file_path:
-        raise ValueError("File path cannot be empty")
-
-    # Resolve to absolute path
-    abs_path = Path(file_path).resolve()
-
-    # Check that file exists
-    if not abs_path.exists():
-        raise ValueError(f"File not found: {abs_path.name}")
-
-    # Check that it's a file (not a directory)
-    if not abs_path.is_file():
-        raise ValueError(f"Path is not a file: {abs_path.name}")
-
-    return abs_path
-
-
 def validate_session_name(name: str) -> str:
     """
     Validate session name for safety.
@@ -322,7 +254,6 @@ class ACL2Session:
     process: asyncio.subprocess.Process
     created_at: float
     last_activity: float
-    event_counter: int = 0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     log_file: Optional[Path] = None
     log_handle: Optional[IO[str]] = None
@@ -516,8 +447,6 @@ class ACL2Session:
                     _debug_log(f"send_command: output truncated, earliest retained seq_id={self.output_buffer[0][0]}, start_seq_id={start_seq_id}")
 
                 _debug_log(f"send_command: collected {len(output_lines)} lines (start_seq_id={start_seq_id})")
-
-                self.event_counter += 1
 
                 # Return collected output, eliding if too large
                 output = "".join(output_lines).strip()
@@ -1461,7 +1390,7 @@ class SessionManager:
             name_str = f" ({session.name})" if session.name else ""
             lines.append(
                 f"  {session_id}{name_str}: "
-                f"age={age:.0f}s, idle={idle:.0f}s, events={session.event_counter}"
+                f"age={age:.0f}s, idle={idle:.0f}s"
             )
 
         return "\n".join(lines)
@@ -1583,7 +1512,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="list_sessions",
-            description="List all active ACL2 sessions with their IDs, names, age, idle time, and event count. Use this to see which sessions are available and their current state.",
+            description="List all active ACL2 sessions with their IDs, names, age, and idle time. Use this to see which sessions are available and their current state.",
             inputSchema={
                 "type": "object",
                 "properties": {},
@@ -1620,28 +1549,6 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["session_id"],
-            },
-        ),
-        Tool(
-            name="prove",
-            description="Submit an ACL2 theorem (defthm) for proof. Use this to prove mathematical properties. Example: (defthm append-nil (implies (true-listp x) (equal (append x nil) x))). The theorem will be proven and added to the ACL2 world. Returns detailed ACL2 proof output.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "code": {
-                        "type": "string",
-                        "description": "ACL2 code to prove (e.g., defthm form)",
-                    },
-                    "timeout": {
-                        "type": "number",
-                        "description": "Timeout in seconds (optional, no timeout if not specified)",
-                    },
-                    "session_id": {
-                        "type": "string",
-                        "description": "ID of the session to use",
-                    },
-                },
-                "required": ["code", "session_id"],
             },
         ),
         Tool(
@@ -1689,59 +1596,6 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
-            name="include_book",
-            description="Load a certified ACL2 book to use its definitions and theorems. Use this to import existing ACL2 libraries before proving new theorems. Optionally run additional code after loading. IMPORTANT: Provide path WITHOUT .lisp extension.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "file_path": {
-                        "type": "string",
-                        "description": "Path to the book WITHOUT .lisp extension. Example: 'std/lists/append' for ACL2 standard library, or 'arithmetic/top' for system books",
-                    },
-                    "code": {
-                        "type": "string",
-                        "description": "Optional ACL2 code to run after loading the book. Example: (thm (equal (+ 1 1) 2))",
-                    },
-                    "timeout": {
-                        "type": "number",
-                        "description": "Timeout in seconds (optional, no timeout if not specified)",
-                    },
-                    "session_id": {
-                        "type": "string",
-                        "description": "ID of the session to use",
-                    },
-                    "use_system_dir": {
-                        "type": "boolean",
-                        "description": "If true, use :dir :system for ACL2 system books (books in the ACL2 books directory). Default: false",
-                        "default": False,
-                    },
-                },
-                "required": ["file_path", "session_id"],
-            },
-        ),
-        Tool(
-            name="query_event",
-            description="Look up the definition and properties of an ACL2 function, theorem, or macro. Use this to understand what's already defined before writing new code, or to check the signature of existing functions. Works with built-in ACL2 functions (e.g., 'append', 'len') or user-defined ones. Uses ACL2's :pe (print-event) command.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "Name of function/theorem to query. Examples: 'append', 'len', 'my-custom-function'",
-                    },
-                    "session_id": {
-                        "type": "string",
-                        "description": "ID of the session to query in",
-                    },
-                    "timeout": {
-                        "type": "number",
-                        "description": "Timeout in seconds (optional, no timeout if not specified)",
-                    },
-                },
-                "required": ["name", "session_id"],
-            },
-        ),
-        Tool(
             name="xdoc_search",
             description="Search the local xdoc agent corpus (all ~77,000 manual topics as plain text; see the acl2-docker project's tools/DESIGN.md) for topics matching a query.  Fast (milliseconds) and works with no ACL2 session.  Searches topic names and one-line summaries by default; set full_text to search topic bodies too.  The corpus is found via the ACL2_XDOC_CORPUS environment variable, or at $ACL2_ROOT/books/doc/agent-corpus (present in the acl2-allcerts Docker image).  Use xdoc_show to read a found topic.",
             inputSchema={
@@ -1779,44 +1633,6 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["name"],
-            },
-        ),
-        Tool(
-            name="undo",
-            description="Undo the last ACL2 event in a persistent session. This removes the most recent definition, theorem, or command from the session's world. Use this to backtrack and try alternative approaches. Uses ACL2's :ubt (undo-back-through) command. Only works with persistent sessions.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "session_id": {
-                        "type": "string",
-                        "description": "ID of the session to undo in",
-                    },
-                    "count": {
-                        "type": "number",
-                        "description": "Number of events to undo (default: 1)",
-                        "default": 1,
-                    },
-                },
-                "required": ["session_id"],
-            },
-        ),
-        Tool(
-            name="get_world_state",
-            description="Display the current ACL2 world state in a session, showing all definitions, theorems, and events. Use this to see what's currently defined in your session. Uses ACL2's :pbt (print-back-through) command.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "session_id": {
-                        "type": "string",
-                        "description": "ID of the session",
-                    },
-                    "limit": {
-                        "type": "number",
-                        "description": "Number of recent events to show (default: 20). Uses :pbt (:x -N) to show the last N events.",
-                        "default": 20,
-                    },
-                },
-                "required": ["session_id"],
             },
         ),
     ]
@@ -1912,50 +1728,6 @@ async def certify_acl2_book(
         return "Error: cert.pl not found in PATH. Make sure ACL2 books build tools are installed."
     except Exception as e:
         return f"Error: Failed to run cert.pl: {e}"
-
-
-def build_include_book_command(file_path: str, additional_code: str = "", use_system_dir: bool = False) -> tuple[str, str]:
-    """
-    Build include-book command for ACL2.
-
-    Args:
-        file_path: Path to the book (without .lisp extension)
-        additional_code: Optional code to run after including
-        use_system_dir: If True, use :dir :system for ACL2 system books
-
-    Returns:
-        Tuple of (command_string, error_message). If error_message is non-empty, command_string is empty.
-    """
-    # Remove .lisp extension if present
-    book_path = str(Path(file_path).with_suffix(""))
-
-    # Only validate file existence when not using :dir :system
-    # When :dir :system is used, ACL2 will handle path resolution from its books directory
-    if not use_system_dir:
-        lisp_path = Path(book_path).with_suffix(".lisp")
-        try:
-            abs_path = validate_file_path(str(lisp_path))
-            # Use absolute path for non-system books
-            escaped_book_path = escape_acl2_string(str(abs_path.with_suffix("")))
-        except ValueError as e:
-            return "", f"Error: {e}"
-    else:
-        # For system books, use the path as-is (relative to ACL2's books directory)
-        escaped_book_path = escape_acl2_string(book_path)
-
-    # Build code to include book and run additional commands
-    if use_system_dir:
-        code = f'(include-book "{escaped_book_path}" :dir :system)'
-    else:
-        code = f'(include-book "{escaped_book_path}")'
-
-    if additional_code.strip():
-        # Validate additional code length
-        if len(additional_code) > MAX_CODE_LENGTH:
-            return "", f"Error: Additional code exceeds maximum length of {MAX_CODE_LENGTH} characters"
-        code += f"\n{additional_code}"
-
-    return code, ""
 
 
 # ---------------------------------------------------------------------------
@@ -2176,117 +1948,6 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             )
         ]
 
-    elif name == "undo":
-        session_id = arguments["session_id"]
-        count = arguments.get("count", 1)
-
-        # SECURITY: Validate count parameter
-        try:
-            count = validate_integer_parameter(count, 1, 10000, "count")
-        except ValueError as e:
-            return [
-                TextContent(
-                    type="text",
-                    text=f"Error: {e}",
-                )
-            ]
-
-        session = session_manager.get_session(session_id)
-        if not session:
-            return [
-                TextContent(
-                    type="text",
-                    text=f"Error: Session {session_id} not found",
-                )
-            ]
-
-        # Before undoing, capture the commands that are about to be removed,
-        # so we can report what was actually undone.  (The output of :u/:ubt
-        # itself shows the most recent SURVIVING command, which is easy to
-        # misread as the removed one.)
-        removed = await session.send_command(f":pbt (:x -{count - 1})")
-
-        # Use ACL2's undo commands with relative addressing
-        # :u undoes the most recent command
-        # :ubt (:x -k) undoes through k commands before the most recent
-        if count == 1:
-            output = await session.send_command(":u")
-        else:
-            output = await session.send_command(f":ubt (:x -{count - 1})")
-
-        # Update event counter (approximate, may drift from actual ACL2 state)
-        session.event_counter = max(0, session.event_counter - count)
-
-        return [
-            TextContent(
-                type="text",
-                text=(
-                    f"Undone {count} event(s).\n\n"
-                    f"Removed (listed oldest first):\n{removed}\n\n"
-                    f"Most recent surviving command (from ACL2's undo output):\n{output}"
-                ),
-            )
-        ]
-
-    elif name == "get_world_state":
-        session_id = arguments["session_id"]
-        limit = arguments.get("limit", 20)
-
-        # SECURITY: Validate limit parameter to prevent DoS
-        try:
-            limit = validate_integer_parameter(limit, 1, 1000, "limit")
-        except ValueError as e:
-            return [
-                TextContent(
-                    type="text",
-                    text=f"Error: {e}",
-                )
-            ]
-
-        session = session_manager.get_session(session_id)
-        if not session:
-            return [
-                TextContent(
-                    type="text",
-                    text=f"Error: Session {session_id} not found",
-                )
-            ]
-
-        # Use ACL2's :pbt (:x -N) to show the last N events
-        # :pbt (:x -N) prints from the most recent command back through (N+1) commands
-        # So to show `limit` events, we use (:x -(limit-1))
-        offset = limit - 1
-        output = await session.send_command(f":pbt (:x -{offset})")
-
-        return [
-            TextContent(
-                type="text",
-                text=f"World state (last {limit} events):\n\n{output}",
-            )
-        ]
-
-    elif name == "prove":
-        code = arguments["code"]
-        timeout = arguments.get("timeout")
-        session_id = arguments["session_id"]
-
-        session = session_manager.get_session(session_id)
-        if not session:
-            return [
-                TextContent(
-                    type="text",
-                    text=f"Error: Session {session_id} not found",
-                )
-            ]
-        output = await session.send_command(code, timeout)
-
-        return [
-            TextContent(
-                type="text",
-                text=output,
-            )
-        ]
-
     elif name == "evaluate":
         code = arguments["code"]
         timeout = arguments.get("timeout")
@@ -2389,65 +2050,6 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
                 ]
 
         output = await certify_acl2_book(file_path, timeout, jobs)
-
-        return [
-            TextContent(
-                type="text",
-                text=output,
-            )
-        ]
-
-    elif name == "include_book":
-        file_path = arguments["file_path"]
-        additional_code = arguments.get("code", "")
-        timeout = arguments.get("timeout")
-        session_id = arguments["session_id"]
-        use_system_dir = arguments.get("use_system_dir", False)
-
-        code, error = build_include_book_command(file_path, additional_code, use_system_dir)
-        if error:
-            return [
-                TextContent(
-                    type="text",
-                    text=error,
-                )
-            ]
-
-        session = session_manager.get_session(session_id)
-        if not session:
-            return [
-                TextContent(
-                    type="text",
-                    text=f"Error: Session {session_id} not found",
-                )
-            ]
-        output = await session.send_command(code, timeout)
-
-        return [
-            TextContent(
-                type="text",
-                text=output,
-            )
-        ]
-
-    elif name == "query_event":
-        name_arg = arguments["name"]
-        session_id = arguments["session_id"]
-        timeout = arguments.get("timeout")
-
-        try:
-            validated_name = validate_acl2_identifier(name_arg)
-        except ValueError as e:
-            return [TextContent(type="text", text=f"Error: {e}")]
-        session = session_manager.get_session(session_id)
-        if not session:
-            return [
-                TextContent(
-                    type="text",
-                    text=f"Error: Session {session_id} not found",
-                )
-            ]
-        output = await session.send_command(f":pe {validated_name}", timeout)
 
         return [
             TextContent(

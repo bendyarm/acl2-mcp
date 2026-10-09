@@ -34,7 +34,7 @@ Each persistent session is represented by an `ACL2Session` dataclass containing:
 - **Process management**: `process`, `session_id`, `name`
 - **PTY infrastructure**: `master_fd`, `ring_buffer`, `partial_line_buffer`
 - **I/O handling**: `merge_queue`, `output_buffer`, `sequence_counter`
-- **State**: `event_counter`, `lock`
+- **State**: `lock`
 - **Logging**: `log_file`, `log_handle`
 
 ### Background I/O Architecture

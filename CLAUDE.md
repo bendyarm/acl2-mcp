@@ -23,7 +23,7 @@ This is an MCP (Model Context Protocol) server that provides tools for interacti
   - Tool definitions and handlers (`list_tools()`, `call_tool()`)
   - Book certification (`certify_acl2_book()`, which runs `cert.pl`)
   - Session management (`SessionManager`, `ACL2Session`)
-  - Security validation functions (timeout, file path, identifiers, etc.)
+  - Security validation functions (timeout, session name, integer bounds)
 
 ### Sessions
 
@@ -51,9 +51,7 @@ Sessions use prompt detection to identify command completion:
 ### Security Features
 
 Security validation (see `SECURITY.md`):
-- Input validation: code length (1MB max), timeout (1-300s), file paths, identifiers
-- Path traversal prevention: all paths resolved to absolute
-- Command injection prevention: ACL2 strings escaped, identifiers validated
+- Input validation: code length (1MB max), timeout (1-300s), session names, integer bounds
 - DoS prevention: session limits, timeout enforcement
 - No internal error details leaked to clients
 
@@ -129,5 +127,5 @@ When adding/modifying tools:
 - **Python 3.10+**: Uses modern type hints (including `dict[str, X]` syntax)
 - **Strict typing**: `mypy --strict` enforced in CI/development
 - **File path conventions**:
-  - Books: WITHOUT `.lisp` extension (certify_book, include_book)
+  - Books: WITHOUT `.lisp` extension (certify_book)
 - **Async throughout**: All I/O operations use asyncio

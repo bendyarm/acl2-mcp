@@ -180,66 +180,11 @@ async def test_session_state_persistence() -> None:
 
 
 @pytest.mark.asyncio
-async def test_undo() -> None:
-    """Test undoing events in a session."""
-    start_result = await call_tool("start_session", {})
-    session_id = extract_session_id(start_result[0].text)
-
-    # Add some events
-    await call_tool("evaluate", {
-        "code": "(defun func1 (x) x)",
-        "session_id": session_id
-    })
-
-    await call_tool("evaluate", {
-        "code": "(defun func2 (x) x)",
-        "session_id": session_id
-    })
-
-    # Undo last event
-    undo_result = await call_tool("undo", {
-        "session_id": session_id,
-        "count": 1
-    })
-
-    assert len(undo_result) == 1
-    assert "Undone" in undo_result[0].text
-
-    # Cleanup
-    await call_tool("end_session", {"session_id": session_id})
-
-
-@pytest.mark.asyncio
-async def test_get_world_state() -> None:
-    """Test getting world state from a session."""
-    start_result = await call_tool("start_session", {})
-    session_id = extract_session_id(start_result[0].text)
-
-    # Add some events
-    await call_tool("evaluate", {
-        "code": "(defun my-func (x) x)",
-        "session_id": session_id
-    })
-
-    # Get world state
-    state_result = await call_tool("get_world_state", {
-        "session_id": session_id,
-        "limit": 10
-    })
-
-    assert len(state_result) == 1
-    assert "World state" in state_result[0].text
-
-    # Cleanup
-    await call_tool("end_session", {"session_id": session_id})
-
-
-@pytest.mark.asyncio
 async def test_session_nonexistent_error() -> None:
     """Test that operations on nonexistent sessions fail gracefully."""
-    result = await call_tool("undo", {
+    result = await call_tool("evaluate", {
         "session_id": "nonexistent-session",
-        "count": 1
+        "code": "(+ 1 1)"
     })
 
     assert len(result) == 1
@@ -331,44 +276,6 @@ async def test_invalid_session_name() -> None:
 
     assert len(result) == 1
     assert "Invalid session name" in result[0].text
-
-
-@pytest.mark.asyncio
-async def test_undo_count_validation() -> None:
-    """Test that undo count is validated."""
-    start_result = await call_tool("start_session", {})
-    session_id = extract_session_id(start_result[0].text)
-
-    # Try invalid count
-    result = await call_tool("undo", {
-        "session_id": session_id,
-        "count": 100000  # Too large
-    })
-
-    assert len(result) == 1
-    assert "must be between" in result[0].text
-
-    # Cleanup
-    await call_tool("end_session", {"session_id": session_id})
-
-
-@pytest.mark.asyncio
-async def test_get_world_state_limit_validation() -> None:
-    """Test that get_world_state limit is validated."""
-    start_result = await call_tool("start_session", {})
-    session_id = extract_session_id(start_result[0].text)
-
-    # Try invalid limit
-    result = await call_tool("get_world_state", {
-        "session_id": session_id,
-        "limit": 10000  # Too large
-    })
-
-    assert len(result) == 1
-    assert "must be between" in result[0].text
-
-    # Cleanup
-    await call_tool("end_session", {"session_id": session_id})
 
 
 @pytest.mark.asyncio

@@ -36,7 +36,7 @@ This skill starts a persistent ACL2 session using the Model Context Protocol (MC
      - If no, proceed to start a new session (step 4)
    - **If multiple existing sessions**:
      - Use AskUserQuestion to ask which session to use, or if they want to start a new one
-     - Show session names, IDs, and their ages/event counts to help the user decide
+     - Show session names, IDs, and their ages and idle times to help the user decide
      - If they choose an existing session, use that session_id (skip to step 6)
      - If they choose to start new, proceed to step 4
    - **If no existing sessions**:
@@ -51,10 +51,8 @@ This skill starts a persistent ACL2 session using the Model Context Protocol (MC
    - The tool will return a `session_id`
    - Remember this ID for use in subsequent ACL2 operations
    - This ID is needed for:
-     - `mcp__acl2__evaluate` (defining functions, evaluating expressions)
-     - `mcp__acl2__prove` (proving theorems)
-     - `mcp__acl2__include_book` (loading books)
-     - Other MCP ACL2 tools
+     - `mcp__acl2__evaluate` (definitions, theorems, `include-book`, queries such as `:pe`, history commands such as `:pbt`)
+     - `mcp__acl2__interrupt_session`, `mcp__acl2__show_session_log`, and `mcp__acl2__end_session`
 
 6. **Report success**:
    - Confirm which session is being used (existing or newly created)
@@ -117,7 +115,7 @@ independent.  To try something on top of your current world instead, set a
 
 ## Monitoring Long-Running Operations
 
-**Use `tail` on the session log** instead of repeatedly calling `mcp__acl2__evaluate` with `t` or using `mcp__acl2__get_world_state` to monitor progress. The session log shows actual ACL2 output in real-time.
+**Use `tail` on the session log** instead of repeatedly calling `mcp__acl2__evaluate` with `t` or `:pbt` to monitor progress. The session log shows actual ACL2 output in real-time.
 
 ```bash
 # See recent output (last 100 lines)

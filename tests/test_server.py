@@ -21,26 +21,6 @@ async def test_session_id_required_wherever_accepted() -> None:
 
 
 @pytest.mark.asyncio
-async def test_call_tool_prove(session_id: str) -> None:
-    """Test the prove tool."""
-    arguments: dict[str, Any] = {
-        "code": """
-(defthm associativity-of-append
-  (equal (append (append x y) z)
-         (append x (append y z))))
-""",
-        "timeout": 15,
-        "session_id": session_id,
-    }
-
-    result = await call_tool("prove", arguments)
-
-    assert len(result) == 1
-    assert result[0].type == "text"
-    assert "Q.E.D." in result[0].text
-
-
-@pytest.mark.asyncio
 async def test_call_tool_evaluate(session_id: str) -> None:
     """Test the evaluate tool."""
     arguments: dict[str, Any] = {
@@ -111,33 +91,3 @@ async def test_call_tool_certify_book_nonexistent() -> None:
     assert len(result) == 1
     assert result[0].type == "text"
     assert "not found" in result[0].text.lower()
-
-
-@pytest.mark.asyncio
-async def test_call_tool_include_book_nonexistent(session_id: str) -> None:
-    """Test include_book with nonexistent file."""
-    arguments: dict[str, Any] = {
-        "file_path": "/tmp/nonexistent_acl2_book",
-        "session_id": session_id,
-    }
-
-    result = await call_tool("include_book", arguments)
-
-    assert len(result) == 1
-    assert result[0].type == "text"
-    assert "not found" in result[0].text.lower()
-
-
-@pytest.mark.asyncio
-async def test_call_tool_query_event_builtin(session_id: str) -> None:
-    """Test query_event with a built-in function."""
-    arguments: dict[str, Any] = {
-        "name": "append",
-        "session_id": session_id,
-    }
-
-    result = await call_tool("query_event", arguments)
-
-    assert len(result) == 1
-    assert result[0].type == "text"
-    assert "APPEND" in result[0].text.upper()

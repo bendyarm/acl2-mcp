@@ -14,30 +14,23 @@ A section near the end of this README describes how to register the MCP server w
 
 ## Features
 
-This MCP server exposes 15 tools for working with ACL2, including support for persistent sessions that enable incremental development.
+This MCP server exposes 9 tools for working with ACL2, including support for persistent sessions that enable incremental development.
 (Note: we are not sure these are all useful; the list may change.)
 
 ### Session Management Tools
 - **start_session**: Create a persistent ACL2 session for incremental development
 - **end_session**: End a persistent session and clean up resources
 - **list_sessions**: List all active sessions with their status
+- **interrupt_session**: Send Ctrl-C to a session that is stuck or churning
+- **show_session_log**: Open or raise the terminal window tailing a session's log
 
-### Code-based Tools
-- **prove**: Submit ACL2 theorems (defthm) for proof
-- **evaluate**: Evaluate arbitrary ACL2 expressions and definitions
+### ACL2 Tools
+- **evaluate**: Send any ACL2 form to a session: definitions, theorems, `include-book`, queries such as `:pe`, and history commands such as `:pbt` and `:ubt`. Requires a `session_id` from `start_session`.
+- **certify_book**: Certify an ACL2 book file with `cert.pl` (loads and verifies all definitions and theorems)
 
-All code-based tools require a `session_id` from `start_session`.
-
-### File-based Tools
-- **certify_book**: Certify an ACL2 book file (loads and verifies all definitions and theorems)
-- **include_book**: Load an ACL2 book and optionally evaluate additional code
-
-### Query and Verification Tools
-- **query_event**: Query information about a defined function, theorem, or event (uses :pe)
-
-### Session State Management Tools
-- **undo**: Undo the last N events in a session
-- **get_world_state**: Display current session state (recent definitions and theorems)
+### Documentation Tools
+- **xdoc_search**: Search the local xdoc corpus (the ACL2 manual as plain text) by topic name or summary, optionally full text
+- **xdoc_show**: Show one topic from the local xdoc corpus
 
 ## Prerequisites
 
@@ -283,7 +276,7 @@ Arguments:
 
 **4. Prove theorems interactively:**
 ```lisp
-Tool: prove
+Tool: evaluate
 Arguments:
   session_id: "a1b2c3d4-..."
   code: "(defthm plus-commutative (equal (plus x y) (plus y x)))"
@@ -321,20 +314,20 @@ Arguments:
 `:ubu` undoes everything after the label and keeps the label, so you can
 return to it again.  See the `acl2-session-history-management` skill.
 
-**8. Inspect session state:**
+**8. Inspect session history:**
 ```lisp
-Tool: get_world_state
+Tool: evaluate
 Arguments:
   session_id: "a1b2c3d4-..."
-  limit: 20  (show last 20 events)
+  code: ":pbt (:x -9)"  (show the last 10 commands)
 ```
 
 **9. Undo mistakes:**
 ```lisp
-Tool: undo
+Tool: evaluate
 Arguments:
   session_id: "a1b2c3d4-..."
-  count: 1  (undo last event)
+  code: ":u"  (undo the last command)
 ```
 
 **10. End session when done:**
@@ -353,7 +346,9 @@ Arguments:
 - ✅ Set checkpoints (`deflabel`) and return to them (`:ubu`) while experimenting
 - ⚡ Sessions auto-timeout after 30 minutes of inactivity
 
-### Code-based Tools
+### Evaluating ACL2 Code
+
+Send any of these through `evaluate` with a `session_id`.
 
 **Prove a Theorem:**
 ```lisp
@@ -372,7 +367,18 @@ Arguments:
 (factorial 5)
 ```
 
-### File-based Tools
+**Include a Book:**
+```lisp
+(include-book "arithmetic/top" :dir :system)
+(include-book "mybook")  ; relative to the session's working directory
+```
+
+**Look Up an Event:**
+```lisp
+:pe append
+```
+
+### Certifying Books
 
 **Certify a Book:**
 ```
@@ -380,39 +386,6 @@ Tool: certify_book
 Arguments:
   file_path: "path/to/mybook"  (without .lisp extension)
   timeout: 120  (optional)
-```
-
-**Include a Book and Run Code:**
-```
-Tool: include_book
-Arguments:
-  session_id: "a1b2c3d4-..."
-  file_path: "path/to/mybook"  (without .lisp extension)
-  code: "(thm (equal (+ 1 1) 2))"  (optional)
-  timeout: 60  (optional)
-  use_system_dir: true  (optional, use :dir :system for ACL2 system books)
-```
-
-For system books (books in the ACL2 books directory), set `use_system_dir: true`:
-```
-Tool: include_book
-Arguments:
-  session_id: "a1b2c3d4-..."
-  file_path: "arithmetic/top"
-  use_system_dir: true
-```
-
-### Query and Verification Tools
-
-**Query an Event:**
-```
-Tool: query_event
-Arguments:
-  session_id: "a1b2c3d4-..."
-  name: "append"
-  timeout: 30  (optional)
-
-Returns the definition and properties of the named event.
 ```
 
 ## Development

@@ -1,17 +1,6 @@
 """Security tests for ACL2 MCP server."""
 
-from pathlib import Path
-from typing import Any
-
-import pytest
-
-from acl2_mcp.server import (
-    validate_timeout,
-    validate_acl2_identifier,
-    escape_acl2_string,
-    validate_file_path,
-    call_tool,
-)
+from acl2_mcp.server import validate_timeout
 
 
 def test_validate_timeout_clamps_max() -> None:
@@ -33,85 +22,3 @@ def test_validate_timeout_handles_float() -> None:
 def test_validate_timeout_handles_invalid_type() -> None:
     """Test that invalid types return default."""
     assert validate_timeout("invalid") == 30  # type: ignore
-
-
-def test_validate_acl2_identifier_rejects_quotes() -> None:
-    """Test that identifiers with quotes are rejected."""
-    with pytest.raises(ValueError, match="Invalid ACL2 identifier"):
-        validate_acl2_identifier('malicious")(+ 1 1)')
-
-
-def test_validate_acl2_identifier_rejects_parens() -> None:
-    """Test that identifiers with parens are rejected."""
-    with pytest.raises(ValueError, match="Invalid ACL2 identifier"):
-        validate_acl2_identifier("malicious)(+ 1 1)")
-
-
-def test_validate_acl2_identifier_rejects_empty() -> None:
-    """Test that empty identifiers are rejected."""
-    with pytest.raises(ValueError, match="cannot be empty"):
-        validate_acl2_identifier("")
-
-
-def test_validate_acl2_identifier_accepts_valid() -> None:
-    """Test that valid identifiers are accepted."""
-    assert validate_acl2_identifier("my-function") == "my-function"
-    assert validate_acl2_identifier("my_function") == "my_function"
-    assert validate_acl2_identifier("my-function-123") == "my-function-123"
-
-
-def test_escape_acl2_string_escapes_quotes() -> None:
-    """Test that quotes are properly escaped."""
-    assert escape_acl2_string('test"quote') == 'test\\"quote'
-
-
-def test_escape_acl2_string_escapes_backslashes() -> None:
-    """Test that backslashes are properly escaped."""
-    assert escape_acl2_string('test\\path') == 'test\\\\path'
-
-
-def test_escape_acl2_string_escapes_both() -> None:
-    """Test that both backslashes and quotes are escaped."""
-    assert escape_acl2_string('test\\"path') == 'test\\\\\\"path'
-
-
-def test_validate_file_path_rejects_empty() -> None:
-    """Test that empty paths are rejected."""
-    with pytest.raises(ValueError, match="cannot be empty"):
-        validate_file_path("")
-
-
-def test_validate_file_path_rejects_nonexistent() -> None:
-    """Test that nonexistent files are rejected."""
-    with pytest.raises(ValueError, match="not found"):
-        validate_file_path("/tmp/nonexistent_file_12345.lisp")
-
-
-def test_validate_file_path_rejects_directory(tmp_path: Any) -> None:
-    """Test that directories are rejected."""
-    with pytest.raises(ValueError, match="not a file"):
-        validate_file_path(str(tmp_path))
-
-
-def test_validate_file_path_accepts_valid_file(tmp_path: Any) -> None:
-    """Test that valid files are accepted."""
-    test_file = tmp_path / "test.lisp"
-    test_file.write_text("(+ 1 1)")
-
-    result = validate_file_path(str(test_file))
-    assert result.exists()
-    assert result.is_file()
-
-
-@pytest.mark.asyncio
-async def test_query_event_injection_protection(session_id: str) -> None:
-    """Test that query_event protects against code injection."""
-    malicious_name = 'append")(+ 1 1)'
-
-    result = await call_tool(
-        "query_event", {"name": malicious_name, "session_id": session_id}
-    )
-
-    assert len(result) == 1
-    assert "Error" in result[0].text
-    assert "Invalid" in result[0].text

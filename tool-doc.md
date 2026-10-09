@@ -2,7 +2,7 @@
 
 > **Note**: This documentation was automatically extracted from the tool definitions in `acl2_mcp/server.py` on 2025-11-03. The source of truth for tool behavior is the Python code itself.
 
-This document provides detailed reference documentation for all 21 tools provided by the ACL2 MCP server.
+This document provides detailed reference documentation for all 9 tools provided by the ACL2 MCP server.
 
 ## Table of Contents
 
@@ -11,19 +11,14 @@ This document provides detailed reference documentation for all 21 tools provide
   - [end_session](#end_session)
   - [list_sessions](#list_sessions)
   - [interrupt_session](#interrupt_session)
+  - [show_session_log](#show_session_log)
 - [Code-based Tools](#code-based-tools)
-  - [prove](#prove)
   - [evaluate](#evaluate)
 - [File-based Tools](#file-based-tools)
   - [certify_book](#certify_book)
-  - [include_book](#include_book)
-- [Query and Verification Tools](#query-and-verification-tools)
-  - [query_event](#query_event)
+- [Documentation Tools](#documentation-tools)
   - [xdoc_search](#xdoc_search)
   - [xdoc_show](#xdoc_show)
-- [Session State Management Tools](#session-state-management-tools)
-  - [undo](#undo)
-  - [get_world_state](#get_world_state)
 
 ---
 
@@ -56,7 +51,7 @@ End a persistent ACL2 session and clean up resources. Use this when you're done 
 
 ### list_sessions
 
-List all active ACL2 sessions with their IDs, names, age, idle time, and event count. Use this to see which sessions are available and their current state.
+List all active ACL2 sessions with their IDs, names, age, and idle time. Use this to see which sessions are available and their current state.
 
 **Parameters:**
 
@@ -74,19 +69,18 @@ Send SIGINT (Ctrl-C) to interrupt a running ACL2 command in a session. Use this 
 
 ---
 
-## Code-based Tools
+### show_session_log
 
-### prove
-
-Submit an ACL2 theorem (defthm) for proof. Use this to prove mathematical properties. Example: (defthm append-nil (implies (true-listp x) (equal (append x nil) x))). The theorem will be proven and added to the ACL2 world. Returns detailed ACL2 proof output.
+Show the session log in a terminal window. If a Terminal window is already tailing this session's log, it is activated and brought to the foreground. If not, a new Terminal window is opened. Requires logging to be enabled for the session.
 
 **Parameters:**
 
-- `code` (required): ACL2 code to prove (e.g., defthm form)
-- `timeout` (optional): Timeout in seconds (optional, no timeout if not specified)
-- `session_id` (required): ID of the session to use
+- `session_id` (required): ID of the session whose log to show
+- `log_tail_lines` (optional): Number of lines to show initially if opening a new window (default: 50)
 
 ---
+
+## Code-based Tools
 
 ### evaluate
 
@@ -114,33 +108,7 @@ Certify ACL2 books using cert.pl with parallel compilation. This verifies all pr
 
 ---
 
-### include_book
-
-Load a certified ACL2 book to use its definitions and theorems. Use this to import existing ACL2 libraries before proving new theorems. Optionally run additional code after loading. IMPORTANT: Provide path WITHOUT .lisp extension.
-
-**Parameters:**
-
-- `file_path` (required): Path to the book WITHOUT .lisp extension. Example: 'std/lists/append' for ACL2 standard library, or 'arithmetic/top' for system books
-- `code` (optional): Optional ACL2 code to run after loading the book. Example: (thm (equal (+ 1 1) 2))
-- `timeout` (optional): Timeout in seconds (optional, no timeout if not specified)
-- `session_id` (required): ID of the session to use
-- `use_system_dir` (optional): If true, use :dir :system for ACL2 system books (books in the ACL2 books directory). Default: false
-
----
-
-## Query and Verification Tools
-
-### query_event
-
-Look up the definition and properties of an ACL2 function, theorem, or macro. Use this to understand what's already defined before writing new code, or to check the signature of existing functions. Works with built-in ACL2 functions (e.g., 'append', 'len') or user-defined ones. Uses ACL2's :pe (print-event) command.
-
-**Parameters:**
-
-- `name` (required): Name of function/theorem to query. Examples: 'append', 'len', 'my-custom-function'
-- `session_id` (required): ID of the session to query in
-- `timeout` (optional): Timeout in seconds (optional, no timeout if not specified)
-
----
+## Documentation Tools
 
 ### xdoc_search
 
@@ -165,30 +133,6 @@ Show one topic from the local xdoc agent corpus by natural name ('bvplus', 'fty:
 
 ---
 
-## Session State Management Tools
-
-### undo
-
-Undo the last ACL2 event in a persistent session. This removes the most recent definition, theorem, or command from the session's world. Use this to backtrack and try alternative approaches. Uses ACL2's :ubt (undo-back-through) command. Only works with persistent sessions.
-
-**Parameters:**
-
-- `session_id` (required): ID of the session to undo in
-- `count` (optional): Number of events to undo (default: 1)
-
----
-
-### get_world_state
-
-Display the current ACL2 world state in a session, showing all definitions, theorems, and events. Use this to see what's currently defined in your session. Uses ACL2's :pbt (print-back-through) command.
-
-**Parameters:**
-
-- `session_id` (required): ID of the session
-- `limit` (optional): Maximum number of recent events to show (default: 20)
-
----
-
 ## General Notes
 
 ### Sessions
@@ -206,7 +150,6 @@ Display the current ACL2 world state in a session, showing all definitions, theo
 - **Maximum code length**: 1MB (1,000,000 characters) per request
 - **Session names**: Alphanumeric characters, hyphens, underscores, and spaces allowed
   - Validated with pattern: `^[a-zA-Z0-9_\- ]+$`
-- **File paths**: Must exist and be files (not directories) when required
 
 ### Execution
 

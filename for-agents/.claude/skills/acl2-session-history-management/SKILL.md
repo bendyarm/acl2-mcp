@@ -208,4 +208,4 @@ X !> (ld "alternative-approach.lisp")
 
 - **Don't call `:pbt` multiple times** to see more history. If the first call didn't show enough, undo or proceed based on what you learned.
 - **Prefer `:pbt (:x -5)` after LD or include-book**: If you want to know the last few successful events from an LD, this is sufficient.
-- **The `mcp__acl2__get_world_state` tool uses `:pbt (:x -N)`** where N is the `limit` parameter. Large limits (e.g., 30+) will show prehistory (negative indices) which is rarely useful. Use small limits (3-5) or use `:pbt 1` directly via `mcp__acl2__evaluate`.
+- **Keep N small in `:pbt (:x -N)`**: large values (e.g., 30+) reach into prehistory (negative indices), which is rarely useful. Use 3-5, or `:pbt 1` for the whole session.
