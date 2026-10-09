@@ -578,6 +578,7 @@ class ACL2Session:
                     if not chunk:
                         # EOF - PTY master closed
                         # Schedule async cleanup
+                        self._stop_reading()
                         asyncio.ensure_future(self._handle_pty_eof())
                         return
 
@@ -597,6 +598,7 @@ class ACL2Session:
                 except OSError as e:
                     if e.errno in (errno.EIO, errno.EBADF):
                         # EIO: I/O error (master closed), EBADF: bad fd
+                        self._stop_reading()
                         asyncio.ensure_future(self._handle_pty_eof())
                         return
                     raise
@@ -604,6 +606,21 @@ class ACL2Session:
         except Exception as e:
             print(f"Error in PTY reader callback: {e}", file=sys.stderr)
             asyncio.ensure_future(self._handle_pty_error(e))
+
+    def _stop_reading(self) -> None:
+        """Remove the event loop reader for the PTY master.
+
+        Once ACL2's side of the PTY is closed, the master stays readable
+        (EOF or EIO), so a reader left registered would be called in a
+        busy loop.
+        """
+        if self.reader_registered and self.master_fd is not None:
+            try:
+                asyncio.get_event_loop().remove_reader(self.master_fd)
+            except (ValueError, OSError):
+                # Reader wasn't registered or fd invalid
+                pass
+        self.reader_registered = False
 
     async def _process_pty_chunk(self, chunk: bytes) -> None:
         """
@@ -782,8 +799,9 @@ class ACL2Session:
                     await self.merge_queue.put((timestamp, seq_id, "stdout", decoded))
                 finally:
                     self.partial_line_buffer.clear()
-            # Only write SESSION ENDED if end_session hasn't already written one.
+            # Only write SESSION ENDED if terminate() hasn't already written one.
             if not self._end_marker_written:
+                self._end_marker_written = True
                 timestamp = time.monotonic()
                 seq_id = await self._get_next_sequence_id()
                 end_time = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -853,60 +871,67 @@ class ACL2Session:
         except Exception as e:
             print(f"Fatal error in logger task: {e}", file=sys.stderr)
 
+    async def _wait_for_exit(self, timeout: float) -> bool:
+        """Wait up to TIMEOUT seconds for the ACL2 process to exit."""
+        try:
+            await asyncio.wait_for(self.process.wait(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
+
     async def terminate(self) -> None:
         """
         Terminate the ACL2 session and stop all background tasks.
         Ensures all output is logged before shutdown.
+
+        ACL2's output is read until the process has exited.  Besides
+        logging it, this keeps the exit from hanging: on macOS a session
+        leader's exit waits until its terminal output has been read.
+        Every wait here is bounded.
         """
         try:
-            # Remove the event loop reader first
-            if self.reader_registered and self.master_fd is not None:
-                loop = asyncio.get_event_loop()
-                try:
-                    loop.remove_reader(self.master_fd)
-                except (ValueError, OSError):
-                    # Reader wasn't registered or fd invalid
-                    pass
-                self.reader_registered = False
-
-            # Send good-bye command to ACL2 via PTY
+            # Ask ACL2 to exit.  The write fails if the input queue is full
+            # (ACL2 is busy and hasn't read the last command), in which case
+            # ACL2 couldn't see the request anyway.  It is sent even if the
+            # acl2 process has died, since the Lisp that an acl2 script
+            # starts may still be reading.
+            goodbye_sent = False
             if self.master_fd is not None:
                 try:
-                    loop = asyncio.get_event_loop()
-                    await loop.run_in_executor(
-                        None,
-                        os.write,
-                        self.master_fd,
-                        b"(good-bye)\n"
-                    )
-                    # Give ACL2 a moment to process goodbye
-                    await asyncio.sleep(0.5)
+                    os.write(self.master_fd, b"(good-bye)\n")
+                    goodbye_sent = True
                 except OSError:
-                    # PTY already closed or other error, ignore
                     pass
 
-            # Wait for process to terminate
-            try:
-                await asyncio.wait_for(self.process.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
-                self.process.kill()
-                await self.process.wait()
-            except Exception:
-                self.process.kill()
-                await self.process.wait()
+            if self.process.returncode is None:
+                if not (goodbye_sent and await self._wait_for_exit(5.0)):
+                    # Kill the whole process group, which includes the Lisp
+                    # that an acl2 script starts.  The group ID is the acl2
+                    # process's PID (it called setsid), which can't be
+                    # reused until we reap that process.
+                    try:
+                        os.killpg(self.process.pid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+                    await self._wait_for_exit(5.0)
 
         finally:
+            # Log the end marker after ACL2's last output, unless
+            # _handle_pty_eof has already logged it
+            if self.log_file and not self._end_marker_written:
+                self._end_marker_written = True
+                # Let output chunks already read reach the queue first
+                await asyncio.sleep(0.1)
+                end_time = time.strftime("%Y-%m-%d %H:%M:%S")
+                end_marker = f"\n[{end_time} SESSION ENDED]\n"
+                seq_id = await self._get_next_sequence_id()
+                await self.merge_queue.put(
+                    (time.monotonic(), seq_id, "session", end_marker))
+
             # Signal background tasks to shut down
             self.shutdown_event.set()
 
-            # Remove reader if not already removed
-            if self.reader_registered and self.master_fd is not None:
-                try:
-                    loop = asyncio.get_event_loop()
-                    loop.remove_reader(self.master_fd)
-                except Exception:
-                    pass
-                self.reader_registered = False
+            self._stop_reading()
 
             # Close PTY master file descriptor
             if self.master_fd is not None:
@@ -1357,18 +1382,7 @@ class SessionManager:
         if not session:
             return f"Error: Session {session_id} not found"
 
-        # Write end marker to log before terminating.
-        # Set _end_marker_written so _handle_pty_eof doesn't write a
-        # duplicate marker when the PTY closes during terminate().
-        session._end_marker_written = True
-        if session.log_file:
-            header_time = time.strftime("%Y-%m-%d %H:%M:%S")
-            end_marker = f"\n[{header_time} SESSION ENDED]\n"
-            seq_id = await session._get_next_sequence_id()
-            await session.merge_queue.put((time.monotonic(), seq_id, "session", end_marker))
-            # Give the logger task a moment to flush
-            await asyncio.sleep(0.1)
-
+        # terminate() logs the SESSION ENDED marker
         await session.terminate()
         del self.sessions[session_id]
 

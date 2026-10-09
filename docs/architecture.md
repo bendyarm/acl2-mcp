@@ -190,12 +190,19 @@ input on macOS but ACL2's pending output on Linux.
 
 ### End Session
 
-1. Remove event loop reader
-2. Send `(good-bye)` to ACL2
-3. Wait briefly for graceful exit
-4. Terminate process if needed
+1. Send `(good-bye)` to ACL2 and wait up to 5 seconds for it to exit
+2. If it hasn't exited (it was busy, or its input queue was full), kill
+   its process group with SIGKILL and wait up to 5 more seconds
+3. Log the `SESSION ENDED` marker
+4. Remove event loop reader
 5. Close PTY master
 6. Clean up buffers and tasks
+
+The reader stays registered until ACL2 has exited, so that its last
+output is logged and its exit can't hang: on macOS, the exit of the
+session leader (the `acl2` process) waits until its terminal output has
+been read.  The reader also removes itself when it reads EOF or EIO,
+since the master stays readable after ACL2's side closes.
 
 ## Platform Notes
 

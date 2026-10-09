@@ -21,6 +21,8 @@ cleanup issue, not a production concern.
 """
 
 import asyncio
+import os
+import time
 from typing import Any
 
 import pytest
@@ -302,6 +304,84 @@ async def test_interrupt_with_full_input_queue(session_id: str) -> None:
         "session_id": session_id, "code": "(+ 1000 337)", "timeout": 10})
     assert "1337" in result[0].text
     assert ":PADDING" not in result[0].text
+
+
+async def process_group_exits(pgid: int, timeout: float = 5.0) -> bool:
+    """Wait up to TIMEOUT seconds for every process in group PGID to exit."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        await asyncio.sleep(0.1)
+    return False
+
+
+async def start_session_and_get_pgid() -> tuple[str, int]:
+    """Start a session; return its ID and its ACL2 process group ID."""
+    result = await call_tool("start_session", {})
+    session_id = extract_session_id(result[0].text)
+    session = session_manager.get_session(session_id)
+    assert session is not None
+    return session_id, session.process.pid
+
+
+@pytest.mark.asyncio
+async def test_end_session_while_acl2_prints() -> None:
+    """end_session finishes while ACL2 is printing a lot of output.
+
+    terminate() used to stop reading ACL2's output before waiting for it
+    to exit.  ACL2 then blocked writing its output and never read
+    (good-bye); once it was killed, its exit waited on macOS for the unread
+    output, and so end_session hung.
+    """
+    session_id, pgid = await start_session_and_get_pgid()
+    # The command times out while ACL2 sleeps; then ACL2 prints ~40 KB.
+    await call_tool("evaluate", {
+        "session_id": session_id, "timeout": 1,
+        "code": '(prog2$ (sleep 2) (cw "~x0~%" (make-list 20000 :initial-element 7)))'})
+
+    result = await asyncio.wait_for(
+        call_tool("end_session", {"session_id": session_id}), timeout=30)
+    assert "ended successfully" in result[0].text
+    assert await process_group_exits(pgid)
+
+
+@pytest.mark.asyncio
+async def test_end_session_kills_busy_acl2() -> None:
+    """end_session kills ACL2 when it is too busy to read (good-bye).
+
+    Every process in the session's group must be gone afterwards,
+    including the Lisp that the acl2 script starts.
+    """
+    session_id, pgid = await start_session_and_get_pgid()
+    await call_tool("evaluate", {
+        "session_id": session_id, "timeout": 1, "code": "(sleep 60)"})
+
+    result = await asyncio.wait_for(
+        call_tool("end_session", {"session_id": session_id}), timeout=30)
+    assert "ended successfully" in result[0].text
+    assert await process_group_exits(pgid)
+
+
+@pytest.mark.asyncio
+async def test_reader_stops_when_acl2_exits(session_id: str) -> None:
+    """Once ACL2 has exited, the session stops reading its PTY.
+
+    The PTY master then reads EOF or EIO forever, so a reader left
+    registered kept the event loop busy (100% CPU until end_session).
+    """
+    session = session_manager.get_session(session_id)
+    assert session is not None
+    await call_tool("evaluate", {
+        "session_id": session_id, "timeout": 10, "code": "(good-bye)"})
+
+    for _ in range(50):
+        if not session.reader_registered:
+            break
+        await asyncio.sleep(0.1)
+    assert not session.reader_registered
 
 
 @pytest.mark.asyncio
