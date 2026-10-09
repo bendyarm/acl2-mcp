@@ -83,7 +83,7 @@ Show the session log in a terminal window. If a Terminal window is already taili
 
 ### evaluate
 
-Send code to an ACL2 session as if typed at its prompt: events (defun, defthm, include-book, deflabel), expressions, and keyword commands (:pe, :pbt, :u, :ubu). Several forms per call are fine. Returns ACL2's output up to its next prompt; look in it for 'ACL2 Error' or 'FAILED' (a failed event changes nothing). Long output is shortened; the session log has all of it. Keep each line under 1,000 bytes.
+Send code to an ACL2 session as if typed at its prompt: events (defun, defthm, include-book, deflabel), expressions, and keyword commands (:pe, :pbt, :u, :ubu). Several forms per call are fine. Returns ACL2's output up to its next prompt; look in it for 'ACL2 Error' or 'FAILED' (a failed event changes nothing). Long output is shortened; the session log has all of it.
 
 **Parameters:**
 

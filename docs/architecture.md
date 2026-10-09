@@ -92,11 +92,39 @@ fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, winsize)
 flags = fcntl.fcntl(master_fd, fcntl.F_GETFL)
 fcntl.fcntl(master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
 
-# Disable echo (ACL2 handles its own)
+# Pass input to ACL2 byte for byte (see Terminal Modes)
 attrs = termios.tcgetattr(slave_fd)
-attrs[3] = attrs[3] & ~termios.ECHO
+attrs[0] &= ~termios.IXON
+attrs[3] &= ~(termios.ECHO | termios.ICANON | termios.IEXTEN)
+attrs[6][termios.VMIN] = 1
+attrs[6][termios.VTIME] = 0
 termios.tcsetattr(slave_fd, termios.TCSANOW, attrs)
 ```
+
+### Terminal Modes
+
+The terminal passes a command to ACL2 unchanged, except for the
+characters that send signals:
+
+- **Canonical mode (`ICANON`) is off.**  In canonical mode the terminal
+  holds input until a newline and limits the length of a line: on macOS
+  it drops everything after 1024 bytes, newline included, so ACL2 waits
+  forever for the rest of the form; on Linux it truncates the line to
+  4096 bytes.  It also edits lines: DEL, C-u and C-w erase input, and C-d
+  ends it, so a C-d at the start of a line makes ACL2 see end of file.
+- **`IEXTEN` is off.**  Even without canonical mode, it makes macOS
+  swallow C-o (which discards output), C-v (which quotes the next
+  character) and C-y (a delayed suspend).
+- **`IXON` is off.**  It makes the terminal swallow C-s and C-q, which
+  stop and restart ACL2's output.
+- **`ISIG` stays on**, so that `interrupt()` can send C-c.  A C-c, C-\
+  or C-z in a command signals ACL2 too.
+- **`ECHO` is off**, so the output holds only what ACL2 prints; the
+  input is logged separately.
+
+Without canonical mode, a read returns as soon as any input has arrived
+(`VMIN` 1, `VTIME` 0).  SBCL and CCL buffer their input themselves and
+read until they have a whole form, as they do from a pipe.
 
 ### Controlling Terminal Setup
 
@@ -149,14 +177,6 @@ Writing stops early in three cases:
 Prompt confirmations are counted only from when the whole command has
 been sent: prompts after a long command's earlier forms can be confirmed
 while the write is still waiting, and must not end the command.
-
-### Known Limitation: Single-Line Length
-
-Single lines longer than 1024 bytes cause the PTY to hang due to the canonical mode (`ICANON`) line buffer limit (`MAX_CANON`). This affects both the MCP server and Emacs shell-mode.
-
-**Workaround**: Use multi-line inputs with lines shorter than 1024 bytes. This is typical for ACL2 code (e.g., mutual-recursion definitions).
-
-**Potential fix**: Disable canonical mode (`~ICANON`), but this may affect ACL2's line editing and signal handling. Not yet implemented.
 
 ## Interrupt Handling
 

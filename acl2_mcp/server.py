@@ -1329,14 +1329,21 @@ class SessionManager:
             flags = fcntl.fcntl(master_fd, fcntl.F_GETFL)
             fcntl.fcntl(master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
 
-            # Configure terminal attributes for raw mode (no line editing, no echo processing)
-            # This prevents the PTY from interpreting control characters and provides
-            # clean echoed input like Emacs shell-mode
+            # Pass input to ACL2 byte for byte.  In canonical mode (ICANON)
+            # the terminal holds input until a newline, truncates a longer
+            # line (1024 bytes on macOS, 4096 on Linux), and edits lines:
+            # DEL, C-u and C-w erase, and C-d ends input (at the start of
+            # a line, ACL2 sees end of file).  IEXTEN (on macOS: C-o, C-v,
+            # C-y) and IXON (C-s, C-q) would still make the terminal
+            # swallow bytes of a command.  ISIG stays on: interrupt()
+            # sends C-c.  ECHO is off, so that the output is only ACL2's
+            # (the input is logged separately).
             try:
                 attrs = termios.tcgetattr(slave_fd)
-                # Use raw mode but keep some minimal processing
-                # ECHO is handled by ACL2/SBCL, so we disable it at PTY level
-                attrs[3] = attrs[3] & ~termios.ECHO  # Disable echo (ACL2 handles its own)
+                attrs[0] &= ~termios.IXON
+                attrs[3] &= ~(termios.ECHO | termios.ICANON | termios.IEXTEN)
+                attrs[6][termios.VMIN] = 1  # read() waits for one byte...
+                attrs[6][termios.VTIME] = 0  # ...however long that takes
                 termios.tcsetattr(slave_fd, termios.TCSANOW, attrs)
             except termios.error:
                 # If termios setup fails, continue anyway - not critical
@@ -1677,7 +1684,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="evaluate",
-            description="Send code to an ACL2 session as if typed at its prompt: events (defun, defthm, include-book, deflabel), expressions, and keyword commands (:pe, :pbt, :u, :ubu). Several forms per call are fine. Returns ACL2's output up to its next prompt; look in it for 'ACL2 Error' or 'FAILED' (a failed event changes nothing). Long output is shortened; the session log has all of it. Keep each line under 1,000 bytes.",
+            description="Send code to an ACL2 session as if typed at its prompt: events (defun, defthm, include-book, deflabel), expressions, and keyword commands (:pe, :pbt, :u, :ubu). Several forms per call are fine. Returns ACL2's output up to its next prompt; look in it for 'ACL2 Error' or 'FAILED' (a failed event changes nothing). Long output is shortened; the session log has all of it.",
             inputSchema={
                 "type": "object",
                 "properties": {

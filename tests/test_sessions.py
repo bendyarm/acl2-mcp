@@ -310,8 +310,37 @@ async def test_interrupt_with_full_input_queue(session_id: str) -> None:
     assert ":PADDING" not in result[0].text
 
 
+@pytest.mark.asyncio
+async def test_long_line(session_id: str) -> None:
+    """A 70 KB line reaches ACL2 whole.
+
+    In canonical mode the terminal kept only the first 1024 bytes of a
+    line on macOS (and dropped its newline, so ACL2 waited for the rest of
+    the form forever), and the first 4096 on Linux.
+    """
+    code = '(length "' + "x" * 70000 + '")'
+    result = await call_tool("evaluate", {
+        "session_id": session_id, "code": code, "timeout": 30})
+    assert "70000" in result[0].text
+
+
+@pytest.mark.asyncio
+async def test_line_editing_characters_reach_acl2(session_id: str) -> None:
+    """Characters that a terminal edits lines with reach ACL2 unchanged.
+
+    In canonical mode DEL, C-u and C-w erased input and C-d ended it (at
+    the start of a line, ACL2 saw end of file and aborted).  C-o discarded
+    output (macOS), C-s stopped it, and C-t printed a status line.
+    """
+    s = "a\x7fb\x15c\x17d\x04e\x0ff\x13g\x14h\n\x04i"
+    s += "x" * (4321 - len(s))
+    result = await call_tool("evaluate", {
+        "session_id": session_id, "code": f'(length "{s}")', "timeout": 10})
+    assert "4321" in result[0].text
+
+
 # About 32 KB of comment lines: more than the PTY input queue holds (about
-# 1 KB on macOS, 20 KB on Linux), with no line near macOS's 1 KB line limit.
+# 1 KB on macOS, 20 KB on Linux).
 FILLER = ("; " + "x" * 78 + "\n") * 400
 
 
