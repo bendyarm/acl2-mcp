@@ -1,5 +1,9 @@
 """Tests for the ACL2 MCP server."""
 
+import asyncio
+import subprocess
+import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -92,6 +96,68 @@ async def test_call_tool_certify_book_nonexistent() -> None:
     assert len(result) == 1
     assert result[0].type == "text"
     assert "not found" in result[0].text.lower()
+
+
+def slow_book(directory: Path) -> str:
+    """Write a book that takes a minute to certify; return its name.
+
+    The name is unique, so that its cert.pl jobs can be found with ps.
+    """
+    name = f"slow{uuid.uuid4().hex[:8]}"
+    (directory / f"{name}.lisp").write_text(
+        '(in-package "ACL2")\n(value-triple (sleep 60))\n')
+    return name
+
+
+def cert_jobs_running(name: str) -> bool:
+    """Is any cert.pl job (make helper, its shell script) for book NAME running?"""
+    ps = subprocess.run(["ps", "-A", "-o", "command"],
+                        capture_output=True, text=True).stdout
+    return any(name in line for line in ps.splitlines())
+
+
+@pytest.mark.asyncio
+async def test_certify_book_timeout_stops_everything(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A certify_book timeout stops cert.pl and every job it started, at once.
+
+    It used to kill only cert.pl: make and ACL2 went on and certified the
+    book, and since they held cert.pl's output open, the call returned
+    only when they had finished.
+    """
+    monkeypatch.chdir(tmp_path)  # cert.pl writes Makefile-tmp here
+    name = slow_book(tmp_path)
+    start = time.monotonic()
+    result = await call_tool("certify_book", {
+        "file_path": str(tmp_path / name), "jobs": 1, "timeout": 5})
+    assert time.monotonic() - start < 15
+    assert "timed out after 5 seconds" in result[0].text
+    assert not cert_jobs_running(name)
+    await asyncio.sleep(2)
+    assert not (tmp_path / f"{name}.cert").exists()
+
+
+@pytest.mark.asyncio
+async def test_certify_book_cancel_stops_everything(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cancelling a certify_book call (as an MCP client does) stops cert.pl
+    and every job it started."""
+    monkeypatch.chdir(tmp_path)
+    name = slow_book(tmp_path)
+    call = asyncio.create_task(call_tool("certify_book", {
+        "file_path": str(tmp_path / name), "jobs": 1}))
+    for _ in range(100):
+        if cert_jobs_running(name):
+            break
+        await asyncio.sleep(0.1)
+    assert cert_jobs_running(name)
+
+    call.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+    assert not cert_jobs_running(name)
+    await asyncio.sleep(2)
+    assert not (tmp_path / f"{name}.cert").exists()
 
 
 @pytest.fixture

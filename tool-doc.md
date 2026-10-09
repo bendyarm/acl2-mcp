@@ -103,7 +103,7 @@ Certify ACL2 books using cert.pl with parallel compilation. This verifies all pr
 
 - `file_path` (required): Path to the book WITHOUT .lisp extension. Use an absolute path: a relative one is resolved against the MCP server's working directory, not a session's.
 - `jobs` (optional): Number of parallel jobs for cert.pl. If not specified, automatically detects based on available CPU threads and current load.
-- `timeout` (optional): Timeout in seconds (optional, no timeout if not specified). Unlike evaluate's timeout, this kills cert.pl.
+- `timeout` (optional): Timeout in seconds (optional, no timeout if not specified). Unlike evaluate's timeout, this stops cert.pl and the jobs it started; the reply ends with cert.pl's last output.
 
 ---
 
@@ -141,9 +141,9 @@ Show one topic from the local xdoc agent corpus by natural name ('bvplus', 'fty:
 - Sessions are isolated from each other
 
 ### Timeouts
-- All timeouts are clamped to the range 1-300 seconds (5 minutes max)
+- `evaluate` timeouts are clamped to the range 1-300 seconds (5 minutes max); `certify_book` timeouts are not
 - If no timeout is specified, operations run until completion (no timeout)
-- An `evaluate` timeout only stops waiting: ACL2 keeps working, and `interrupt_session` stops it.  A `certify_book` timeout kills cert.pl.
+- An `evaluate` timeout only stops waiting: ACL2 keeps working, and `interrupt_session` stops it.  A `certify_book` timeout, or cancelling the call, stops cert.pl and the jobs it started.
 
 ### Security Constraints
 - **Maximum code length**: 1MB (1,000,000 characters) per request

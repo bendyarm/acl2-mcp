@@ -218,6 +218,29 @@ session leader (the `acl2` process) waits until its terminal output has
 been read.  The reader also removes itself when it reads EOF or EIO,
 since the master stays readable after ACL2's side closes.
 
+## Book Certification
+
+`certify_book` runs `cert.pl` as a separate process, not in a session.
+`cert.pl` execs `make`, which runs a helper script, a shell, and ACL2 for
+each book.  They all share `cert.pl`'s output pipe, and `cert.pl` is
+started in a process group of its own (`start_new_session=True`), so that
+`_stop_certification` can stop all of them: SIGTERM to the group (`make`
+then removes the target it was building), then SIGKILL after 5 seconds.
+This happens on a timeout, when the client cancels the tool call, and at
+server exit (`_running_certifications`).  Killing only `cert.pl` would
+leave the rest running, and the call would wait for them, since they
+keep its output pipe open.
+
+## Server Shutdown
+
+An MCP client stops a stdio server by closing its stdin, then sending
+SIGTERM if it hasn't exited, then SIGKILL.  On stdin EOF the MCP library
+waits for running tool calls to finish before `run()` returns and cleans
+up (ends all sessions, stops all certifications).  On SIGTERM, `run()`
+cancels the running tool calls, cleans up in a task of its own, and exits
+with `os._exit(0)`: if stdin is still open, the library's thread reading
+it stays blocked in `read()`, and the process would not otherwise exit.
+
 ## Platform Notes
 
 - **macOS/Linux**: Full PTY support

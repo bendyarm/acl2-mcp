@@ -1713,7 +1713,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "timeout": {
                         "type": "number",
-                        "description": "Timeout in seconds (optional, no timeout if not specified). Unlike evaluate's timeout, this kills cert.pl.",
+                        "description": "Timeout in seconds (optional, no timeout if not specified). Unlike evaluate's timeout, this stops cert.pl and the jobs it started; the reply ends with cert.pl's last output.",
                     },
                 },
                 "required": ["file_path"],
@@ -1762,6 +1762,45 @@ async def list_tools() -> list[Tool]:
     ]
 
 
+# cert.pl processes still running, so that they can be stopped when the
+# server exits (they run in process groups of their own, so they would
+# outlive it).
+_running_certifications: set["asyncio.subprocess.Process"] = set()
+
+
+async def _stop_certification(process: "asyncio.subprocess.Process") -> None:
+    """Stop cert.pl and everything it started.
+
+    cert.pl execs make, which runs a helper script, a shell, and ACL2 for
+    each book, all in cert.pl's process group, whose ID is cert.pl's PID.
+    SIGTERM makes make remove the target it was building; anything still
+    running 5 seconds later gets SIGKILL.  The group is signalled only
+    while process.wait() hasn't returned, that is, while cert.pl or a
+    process sharing its output is still alive, so the group ID is still in
+    use and can't have been reused.
+    """
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(process.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            break
+        try:
+            await asyncio.wait_for(process.wait(), 5.0)
+            break
+        except asyncio.TimeoutError:
+            pass
+    # Not reached if this was cancelled; stop_all_certifications() then
+    # finishes the job at server exit.
+    _running_certifications.discard(process)
+
+
+async def stop_all_certifications() -> None:
+    """Stop every cert.pl still running (at server exit)."""
+    await asyncio.gather(
+        *(_stop_certification(p) for p in list(_running_certifications)),
+        return_exceptions=True)
+
+
 async def certify_acl2_book(
     file_path: str,
     timeout: int | None = None,
@@ -1793,32 +1832,53 @@ async def certify_acl2_book(
     if progress_callback:
         await progress_callback(f"Running: {cmd_display}")
 
-    # Use cert.pl to certify the book
+    # Use cert.pl to certify the book.  It runs in a process group of its
+    # own, so that a timeout or a cancelled tool call can stop everything
+    # it starts (see _stop_certification).
     try:
         process = await asyncio.create_subprocess_exec(
             *cmd_args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,  # Combine stderr into stdout
+            start_new_session=True,
             # Note: Consider passing an appropriate directory here.
             # Right now we assume the MCP server was started in the ACL2 directory
             # but if not then the errors can be confusing.
             # cwd="/path/to/working/directory/"
         )
+        _running_certifications.add(process)
 
+        # Collect the output as it arrives, so that a timeout can report
+        # how far cert.pl got.  It ends when cert.pl and everything it
+        # started have exited, since they all share its stdout.
+        chunks: list[bytes] = []
+
+        async def collect_output() -> None:
+            assert process.stdout is not None
+            while chunk := await process.stdout.read(65536):
+                chunks.append(chunk)
+
+        collector = asyncio.create_task(collect_output())
         try:
-            if timeout is not None:
-                stdout, _ = await asyncio.wait_for(
-                    process.communicate(),
-                    timeout=timeout
-                )
-            else:
-                stdout, _ = await process.communicate()
-        except asyncio.TimeoutError:
-            process.kill()
+            await asyncio.wait_for(asyncio.shield(collector), timeout)
             await process.wait()
-            return f"Error: cert.pl execution timed out after {timeout} seconds"
+            _running_certifications.discard(process)
+        except asyncio.TimeoutError:
+            await _stop_certification(process)
+            await asyncio.wait({collector}, timeout=1.0)
+            output = b"".join(chunks).decode(errors="replace")
+            tail = "\n".join(output.splitlines()[-20:])
+            return (f"Error: cert.pl timed out after {timeout} seconds; it "
+                    f"and the jobs it started were stopped.\n\n"
+                    f"Last output:\n{tail}")
+        except asyncio.CancelledError:
+            # The client cancelled the tool call, or the server is exiting
+            await _stop_certification(process)
+            raise
+        finally:
+            collector.cancel()
 
-        output = stdout.decode()
+        output = b"".join(chunks).decode(errors="replace")
         exit_code = process.returncode
 
         # Check for success: exit code 0 AND no "***" in output
@@ -2232,6 +2292,36 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
 
 async def run() -> None:
     """Run the server."""
+    # MCP clients stop a server by closing its input, then sending SIGTERM
+    # if it hasn't exited (it waits for tool calls still running, such as a
+    # long certification).  SIGTERM's default action would kill it at once,
+    # skipping the cleanup and leaving certifications running.  Instead,
+    # cancel the running tool calls, clean up, and exit.  The cleanup runs
+    # in a task of its own because run() may never get to its finally: if
+    # stdin is still open, the MCP library's thread reading it stays
+    # blocked in read(), and the library waits for that thread.
+    main_task = asyncio.current_task()
+    cleaning_up = False
+    exit_tasks: list["asyncio.Task[None]"] = []
+
+    async def clean_up() -> None:
+        await session_manager.cleanup_all()
+        await stop_all_certifications()
+
+    async def clean_up_and_exit() -> None:
+        await clean_up()
+        os._exit(0)
+
+    def on_sigterm() -> None:
+        nonlocal cleaning_up
+        if cleaning_up:
+            return  # the server is already shutting down
+        cleaning_up = True
+        if main_task is not None:
+            main_task.cancel()
+        exit_tasks.append(asyncio.create_task(clean_up_and_exit()))
+
+    asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, on_sigterm)
     try:
         async with stdio_server() as (read_stream, write_stream):
             await app.run(
@@ -2240,8 +2330,13 @@ async def run() -> None:
                 app.create_initialization_options(),
             )
     finally:
-        # Clean up all sessions on shutdown
-        await session_manager.cleanup_all()
+        # Clean up all sessions and certifications on shutdown
+        if not cleaning_up:
+            cleaning_up = True
+            await clean_up()
+        elif exit_tasks:
+            # After SIGTERM: let its cleanup finish (it exits the process)
+            await exit_tasks[0]
 
 
 def main() -> None:
