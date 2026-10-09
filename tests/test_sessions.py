@@ -279,6 +279,32 @@ async def test_invalid_session_name() -> None:
 
 
 @pytest.mark.asyncio
+async def test_interrupt_with_full_input_queue(session_id: str) -> None:
+    """Interrupt works when ACL2's input queue is full.
+
+    While ACL2 sleeps, a command bigger than the PTY input queue (about
+    1 KB on macOS, 20 KB on Linux) fills it, leaving no room to write
+    Ctrl-C.  The interrupt must fall back to SIGINT and discard the unread
+    input, so that none of the queued forms run and no partial form is
+    left to swallow the next command.
+    """
+    code = "(sleep 10)\n" + "(value-triple :padding)\n" * 2000
+    await call_tool("evaluate", {
+        "session_id": session_id, "code": code, "timeout": 30})
+
+    result = await call_tool("interrupt_session", {"session_id": session_id})
+    assert "SIGINT (fallback)" in result[0].text
+    # interrupt_session returns before ACL2 prints its abort message and
+    # prompt; a command sent sooner would take that prompt as its own.
+    await asyncio.sleep(2)
+
+    result = await call_tool("evaluate", {
+        "session_id": session_id, "code": "(+ 1000 337)", "timeout": 10})
+    assert "1337" in result[0].text
+    assert ":PADDING" not in result[0].text
+
+
+@pytest.mark.asyncio
 async def test_broken_pipe_on_send_command() -> None:
     """Test that BrokenPipeError is handled gracefully when sending commands."""
     start_result = await call_tool("start_session", {})

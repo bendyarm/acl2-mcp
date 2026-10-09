@@ -261,6 +261,7 @@ class ACL2Session:
 
     # PTY infrastructure
     master_fd: Optional[int] = None
+    slave_path: Optional[str] = None  # e.g. /dev/pts/3; see _flush_pty_input
     reader_registered: bool = False  # Track whether loop.add_reader was called
     ring_buffer: bytearray = field(default_factory=bytearray)
     max_ring_buffer_size: int = 65536  # 64KB rolling buffer
@@ -460,12 +461,32 @@ class ACL2Session:
                 # SECURITY: Don't leak internal details in error messages
                 return "Error: Failed to execute command in session"
 
+    def _flush_pty_input(self) -> None:
+        """Discard input written to the PTY that ACL2 has not read yet."""
+        if self.slave_path is None:
+            return
+        # Flush on the slave side, opened by name.  A flush through the
+        # master fd differs by platform: TCIFLUSH there discards this input
+        # on macOS but ACL2's pending output on Linux.
+        try:
+            fd = os.open(self.slave_path,
+                         os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+            try:
+                termios.tcflush(fd, termios.TCIFLUSH)
+            finally:
+                os.close(fd)
+        except (OSError, termios.error):
+            pass
+
     async def interrupt(self) -> str:
         """
         Interrupt a running command in this session by sending Ctrl-C via PTY.
 
         This mimics a user pressing Ctrl-C in a terminal. The PTY's controlling
         terminal setup ensures the interrupt is delivered correctly to ACL2/SBCL.
+
+        If the Ctrl-C cannot be written, do what the terminal would do with
+        it: discard ACL2's unread input and send SIGINT to the process group.
 
         Returns:
             Status message indicating success or failure
@@ -498,15 +519,15 @@ class ACL2Session:
 
                 return "Interrupt signal sent via PTY"
 
-            except OSError as e:
-                if e.errno in (errno.EIO, errno.EBADF, errno.EPIPE):
-                    # PTY write failed, try fallback method
-                    pass
-                else:
-                    raise
+            except OSError:
+                # PTY write failed, try fallback method.  The usual cause
+                # is EAGAIN: ACL2 is busy, and the input queue is full of a
+                # command it has not read yet, leaving no room for Ctrl-C.
+                pass
 
-            # Fallback method: Send SIGINT to the process group
-            # This is needed if the PTY write fails for some reason
+            # Fallback method: Send SIGINT to the process group, after
+            # discarding the unread input, as the terminal does for Ctrl-C
+            self._flush_pty_input()
             try:
                 # Get the process group ID and send SIGINT
                 pgid = os.getpgid(self.process.pid)
@@ -1241,7 +1262,9 @@ class SessionManager:
                 preexec_fn=setup_controlling_tty,  # Critical for proper terminal setup
             )
 
-            # Close slave_fd in parent process (child inherited it)
+            # Remember the slave's name for _flush_pty_input, then close
+            # slave_fd in parent process (child inherited it)
+            slave_path = os.ttyname(slave_fd)
             os.close(slave_fd)
 
             # Set up logging first if enabled
@@ -1264,6 +1287,7 @@ class SessionManager:
                 last_activity=time.time(),
                 log_file=log_file,
                 master_fd=master_fd,
+                slave_path=slave_path,
                 ring_buffer=bytearray(),
                 tool_output_config=self.config.tool_output,
             )

@@ -153,12 +153,20 @@ Interrupts are sent via PTY (preferred) with SIGINT fallback:
 # Primary: Send Ctrl-C through PTY
 os.write(self.master_fd, b"\x03")
 
-# Fallback: Send SIGINT to process group
+# Fallback: discard unread input, then send SIGINT to process group
+self._flush_pty_input()
 pgid = os.getpgid(self.process.pid)
 os.killpg(pgid, signal.SIGINT)
 ```
 
-The PTY method is preferred because it matches terminal behavior exactly.
+The PTY method is preferred because it matches terminal behavior exactly:
+the line discipline discards ACL2's unread input and sends SIGINT.  The
+fallback does the same two steps itself.  It is needed when the Ctrl-C
+cannot be written, usually because ACL2 is busy and the input queue is
+full of a command it has not read yet (EAGAIN; the queue holds about 1 KB
+on macOS and 20 KB on Linux).  The flush opens the slave by name
+(`slave_path`), because a `tcflush` through the master fd discards the
+input on macOS but ACL2's pending output on Linux.
 
 ## Session Lifecycle
 
