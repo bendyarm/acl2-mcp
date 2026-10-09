@@ -41,7 +41,7 @@ it afterwards.
 ### Session Communication
 
 Sessions use prompt detection to identify command completion:
-- Commands sent via PTY master (chunked writes for large inputs)
+- Commands sent via PTY master, waiting for room as ACL2 reads (a long command can exceed the PTY input queue)
 - Background reader continuously captures output to a buffer
 - `send_command()` waits for prompt patterns to appear in output
 - Prompt patterns match ACL2 (`.*>[ ]*$`), SBCL debugger (`.*\] $`), and raw Lisp (`.*\* $`)

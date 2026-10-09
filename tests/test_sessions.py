@@ -291,11 +291,83 @@ async def test_interrupt_with_full_input_queue(session_id: str) -> None:
     left to swallow the next command.
     """
     code = "(sleep 10)\n" + "(value-triple :padding)\n" * 2000
-    await call_tool("evaluate", {
-        "session_id": session_id, "code": code, "timeout": 30})
+    # evaluate waits for ACL2 to read the rest; interrupt meanwhile.
+    evaluation = asyncio.create_task(call_tool("evaluate", {
+        "session_id": session_id, "code": code, "timeout": 60}))
+    await asyncio.sleep(1)
 
     result = await call_tool("interrupt_session", {"session_id": session_id})
     assert "SIGINT (fallback)" in result[0].text
+
+    result = await evaluation
+    assert "interrupted before the whole command was sent" in result[0].text
+    assert "ABORTING" in result[0].text
+    assert ":PADDING" not in result[0].text
+
+    result = await call_tool("evaluate", {
+        "session_id": session_id, "code": "(+ 1000 337)", "timeout": 10})
+    assert "1337" in result[0].text
+    assert ":PADDING" not in result[0].text
+
+
+# About 32 KB of comment lines: more than the PTY input queue holds (about
+# 1 KB on macOS, 20 KB on Linux), with no line near macOS's 1 KB line limit.
+FILLER = ("; " + "x" * 78 + "\n") * 400
+
+
+@pytest.mark.asyncio
+async def test_long_command_while_acl2_busy(session_id: str) -> None:
+    """A command bigger than the PTY input queue is sent in full while
+    ACL2 is busy with its first form.
+
+    The write used to give up when the queue filled ("Failed to write
+    complete command to session"), leaving a partial form in ACL2's reader
+    to swallow the next command.
+    """
+    code = "(sleep 2)\n" + FILLER + "(value-triple :last-form-done)"
+    result = await call_tool("evaluate", {
+        "session_id": session_id, "code": code, "timeout": 60})
+    assert ":LAST-FORM-DONE" in result[0].text
+
+    result = await call_tool("evaluate", {
+        "session_id": session_id, "code": "(+ 1000 337)", "timeout": 10})
+    assert "1337" in result[0].text
+
+
+@pytest.mark.asyncio
+async def test_timeout_while_command_is_still_being_sent(
+        session_id: str) -> None:
+    """A command that times out before ACL2 has read all of it is still
+    sent in full, and the next command runs after it."""
+    session = session_manager.get_session(session_id)
+    assert session is not None and session.log_file is not None
+    code = "(sleep 4)\n" + FILLER + "(value-triple :last-form-done)"
+    result = await call_tool("evaluate", {
+        "session_id": session_id, "code": code, "timeout": 1})
+    assert "timed out" in result[0].text
+    assert "the rest will be sent" in result[0].text
+
+    result = await call_tool("evaluate", {
+        "session_id": session_id, "code": "(+ 1000 337)", "timeout": 30})
+    assert "1337" in result[0].text
+    log = session.log_file.read_text()
+    assert log.index(":LAST-FORM-DONE") < log.index("1337")
+
+
+@pytest.mark.asyncio
+async def test_interrupt_stops_sending_rest_of_command(
+        session_id: str) -> None:
+    """After a command times out before ACL2 has read all of it, an
+    interrupt stops the rest from being sent."""
+    session = session_manager.get_session(session_id)
+    assert session is not None and session.log_file is not None
+    code = "(sleep 10)\n" + FILLER + "(value-triple :last-form-done)"
+    result = await call_tool("evaluate", {
+        "session_id": session_id, "code": code, "timeout": 1})
+    assert "the rest will be sent" in result[0].text
+
+    result = await call_tool("interrupt_session", {"session_id": session_id})
+    assert "Interrupt signal sent" in result[0].text
     # interrupt_session returns before ACL2 prints its abort message and
     # prompt; a command sent sooner would take that prompt as its own.
     await asyncio.sleep(2)
@@ -303,7 +375,9 @@ async def test_interrupt_with_full_input_queue(session_id: str) -> None:
     result = await call_tool("evaluate", {
         "session_id": session_id, "code": "(+ 1000 337)", "timeout": 10})
     assert "1337" in result[0].text
-    assert ":PADDING" not in result[0].text
+    log = session.log_file.read_text()
+    assert "INPUT CUT SHORT" in log
+    assert ":LAST-FORM-DONE" not in log
 
 
 async def process_group_exits(pgid: int, timeout: float = 5.0) -> bool:

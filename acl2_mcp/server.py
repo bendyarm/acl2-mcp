@@ -262,6 +262,9 @@ class ACL2Session:
     # PTY infrastructure
     master_fd: Optional[int] = None
     slave_path: Optional[str] = None  # e.g. /dev/pts/3; see _flush_pty_input
+    interrupt_count: int = 0  # Incremented by interrupt(); see _write_input
+    # Sends the rest of a command whose evaluate call timed out
+    _pending_write: Optional["asyncio.Task[None]"] = field(default=None, repr=False)
     reader_registered: bool = False  # Track whether loop.add_reader was called
     ring_buffer: bytearray = field(default_factory=bytearray)
     max_ring_buffer_size: int = 65536  # 64KB rolling buffer
@@ -323,14 +326,32 @@ class ACL2Session:
             # SECURITY: Validate timeout
             validated_timeout = validate_timeout(timeout)
 
+            # The timeout covers the whole command: waiting for an earlier
+            # command to be sent, sending this one, and evaluating it.
+            start_time = time.time()
+            deadline = (None if validated_timeout is None
+                        else start_time + validated_timeout)
+
             try:
-                # Capture sequence counters BEFORE adding anything to queues or
-                # writing to PTY.  During the await calls below, the event loop
-                # can run _logger_task / _flush_prompt, which append to
-                # output_buffer and increment prompt_seq.  If we capture these
-                # after those awaits, we might miss the response entirely.
+                # Never write into the middle of an earlier command that is
+                # still being sent (see _finish_write).
+                pending = self._pending_write
+                if pending is not None and not pending.done():
+                    remaining = (None if deadline is None
+                                 else max(0.0, deadline - time.time()))
+                    try:
+                        await asyncio.wait_for(asyncio.shield(pending), remaining)
+                    except asyncio.TimeoutError:
+                        return ("Error: Command not sent: ACL2 is still busy and "
+                                "has not yet read all of the previous command.  "
+                                "Wait and try again, or call interrupt_session.")
+
+                # Capture the output sequence counter BEFORE adding anything
+                # to queues or writing to PTY.  During the await calls below,
+                # the event loop can run _logger_task, which appends to
+                # output_buffer.  If we capture it after those awaits, we
+                # might miss the response entirely.
                 start_seq_id = self.sequence_counter
-                start_prompt_seq = self.prompt_seq
                 # Set the max depth for prompt confirmation.  Only prompts
                 # at this depth or less will be confirmed.  This prevents
                 # intermediate LD prompts (deeper) from triggering early
@@ -349,50 +370,46 @@ class ACL2Session:
                 timestamp_line = f"[{current_time} INPUT]\n"
                 await self.merge_queue.put((timestamp_mono, seq_id, "stdin", timestamp_line))
 
-                # Send command to ACL2 via PTY master
-                # Use chunked writes to avoid PTY buffer saturation. On macOS,
-                # PIPE_BUF is only 512 bytes, and writing large inputs in one
-                # os.write() call can cause partial writes or deadlocks when
-                # the PTY output buffer fills with echoed input. By writing in
-                # small chunks and yielding to the event loop between chunks,
-                # we allow the PTY reader to drain ACL2's output and prevent
-                # buffer backpressure.
-                try:
-                    command_bytes = f"{command}\n".encode()
-                    loop = asyncio.get_event_loop()
-                    chunk_size = 512  # macOS PIPE_BUF size
-                    total_written = 0
-
-                    for i in range(0, len(command_bytes), chunk_size):
-                        chunk = command_bytes[i:i + chunk_size]
-                        written = await loop.run_in_executor(
-                            None,
-                            os.write,
-                            self.master_fd,
-                            chunk
-                        )
-                        if written < len(chunk):
-                            return "Error: Failed to write complete command to session"
-                        total_written += written
-                        # Yield to event loop to allow PTY output to be drained
-                        # This prevents buffer saturation when ACL2 echoes input
-                        # A small delay is needed to give the reader time to process
-                        await asyncio.sleep(0.001)
-
-                except OSError as e:
-                    if e.errno in (errno.EIO, errno.EBADF, errno.EPIPE):
-                        return "Error: Session connection lost"
-                    raise
+                # Send command to ACL2 via PTY master.  ACL2 may not read it
+                # all at once (see _write_input).
+                data = memoryview(f"{command}\n".encode())
+                interrupts = self.interrupt_count
+                written, outcome = await self._write_input(
+                    data, 0, deadline, interrupts)
+                if outcome == "closed":
+                    return "Error: Session terminated during command execution"
+                if outcome == "timeout":
+                    # As for any timeout, leave ACL2 working; send it the
+                    # rest of the command as it reads.
+                    self._pending_write = asyncio.create_task(
+                        self._finish_write(data, written, interrupts))
+                    self._adopt_pending_prompt()
+                    log_hint = (f"  Session log: {self.log_file}"
+                                if self.log_file else "")
+                    return (f"Error: Command execution timed out after "
+                            f"{validated_timeout} seconds.  ACL2 is still busy "
+                            f"and has not read all of the command yet "
+                            f"({written} of {len(data)} bytes sent); the rest "
+                            f"will be sent as it reads.  To stop it instead, "
+                            f"call interrupt_session.{log_hint}")
+                note = ""
+                if outcome == "interrupted":
+                    await self._log_input_cut_short(written, len(data))
+                    note = (f"Note: interrupted before the whole command was "
+                            f"sent ({written} of {len(data)} bytes); the rest "
+                            f"was discarded.\n")
 
                 # Wait for a confirmed prompt from the chunk processor.
                 # The chunk processor detects potential prompts in partial
                 # buffers and waits PROMPT_SETTLE_SECONDS before confirming,
                 # then increments prompt_seq and notifies via prompt_condition.
                 #
-                # We capture prompt_seq *before* sending so that stale
-                # confirmations from earlier commands (e.g., LD intermediate
-                # prompts still being flushed) are ignored.
-                start_time = time.time()
+                # We capture prompt_seq only now that the command has been
+                # sent, so that earlier confirmations are ignored: stale ones
+                # from earlier commands (e.g., LD intermediate prompts still
+                # being flushed), and ones from this command's earlier forms
+                # while the write was waiting for ACL2 to read.
+                start_prompt_seq = self.prompt_seq
                 _debug_log(f"send_command: start_seq_id={start_seq_id}, start_prompt_seq={start_prompt_seq}, output_buffer_len={len(self.output_buffer)}")
 
                 try:
@@ -410,7 +427,7 @@ class ACL2Session:
                                     # (e.g., after (ld *standard-oi*)
                                     # produces a depth-2 prompt).
                                     self._adopt_pending_prompt()
-                                    return f"Error: Command execution timed out after {validated_timeout} seconds"
+                                    return note + f"Error: Command execution timed out after {validated_timeout} seconds"
                                 remaining = max(0.1, validated_timeout - elapsed)
                                 wait_timeout = min(remaining, 1.0)
                             else:
@@ -451,7 +468,7 @@ class ACL2Session:
 
                 # Return collected output, eliding if too large
                 output = "".join(output_lines).strip()
-                return elide_large_output(output, self.tool_output_config, self.log_file)
+                return note + elide_large_output(output, self.tool_output_config, self.log_file)
 
             except OSError as e:
                 if e.errno in (errno.EIO, errno.EBADF, errno.EPIPE):
@@ -460,6 +477,64 @@ class ACL2Session:
             except Exception:
                 # SECURITY: Don't leak internal details in error messages
                 return "Error: Failed to execute command in session"
+
+    async def _write_input(self, data: memoryview, written: int,
+                           deadline: Optional[float],
+                           interrupts: int) -> tuple[int, str]:
+        """Write DATA[WRITTEN:] to the PTY, waiting for room as ACL2 reads.
+
+        The PTY holds only so much unread input (about 1 KB on macOS and
+        20 KB on Linux).  While ACL2 is busy with an earlier form of the
+        same command, the queue fills up and a write fails with EAGAIN.
+        That is not an error: wait for ACL2 to read more, and retry.
+
+        Returns the number of bytes of DATA written so far and why writing
+        stopped: "done"; "timeout" (DEADLINE passed); "interrupted"
+        (interrupt() was called since INTERRUPTS was read from
+        interrupt_count; the rest must not follow it); or "closed".
+        """
+        delay = 0.001
+        while written < len(data):
+            if self.interrupt_count != interrupts:
+                return written, "interrupted"
+            fd = self.master_fd
+            if fd is None:
+                return written, "closed"
+            try:
+                written += os.write(fd, data[written:])
+                delay = 0.001
+                if written < len(data):
+                    # Let the reader drain ACL2's output
+                    await asyncio.sleep(0)
+            except BlockingIOError:
+                if deadline is not None and time.time() >= deadline:
+                    return written, "timeout"
+                await asyncio.sleep(delay)
+                delay = min(2 * delay, 0.05)
+        return written, "done"
+
+    async def _finish_write(self, data: memoryview, written: int,
+                            interrupts: int) -> None:
+        """Send the rest of a command whose evaluate call timed out.
+
+        Runs as a task (_pending_write) after send_command has returned.
+        send_command waits for it before sending another command.
+        """
+        try:
+            written, outcome = await self._write_input(
+                data, written, None, interrupts)
+        except OSError:
+            return
+        if outcome == "interrupted":
+            await self._log_input_cut_short(written, len(data))
+
+    async def _log_input_cut_short(self, written: int, total: int) -> None:
+        """Note in the session log that a command was not sent in full."""
+        seq_id = await self._get_next_sequence_id()
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+        marker = (f"[{now} INPUT CUT SHORT: {written} of {total} bytes sent, "
+                  f"the rest discarded]\n")
+        await self.merge_queue.put((time.monotonic(), seq_id, "stdin", marker))
 
     def _flush_pty_input(self) -> None:
         """Discard input written to the PTY that ACL2 has not read yet."""
@@ -497,6 +572,10 @@ class ACL2Session:
 
             if self.process.returncode is not None:
                 return "Error: Session process has already terminated"
+
+            # Stop any command still being written (see _write_input): its
+            # rest must not follow the interrupt.
+            self.interrupt_count += 1
 
             # Primary method: Send Ctrl-C (0x03) through the PTY
             # This is how a terminal delivers interrupts - the line discipline
@@ -890,6 +969,13 @@ class ACL2Session:
         Every wait here is bounded.
         """
         try:
+            # Stop sending the rest of a timed-out command, so that
+            # (good-bye) doesn't land in the middle of it and nothing is
+            # written after the master fd is closed.
+            if self._pending_write is not None:
+                self._pending_write.cancel()
+                await asyncio.gather(self._pending_write, return_exceptions=True)
+
             # Ask ACL2 to exit.  The write fails if the input queue is full
             # (ACL2 is busy and hasn't read the last command), in which case
             # ACL2 couldn't see the request anyway.  It is sent even if the

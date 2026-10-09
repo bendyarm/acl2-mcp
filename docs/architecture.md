@@ -120,22 +120,35 @@ env["LINES"] = "24"
 
 ## Sending Commands
 
-### Chunked Writes
+### Writing a Command
 
-Large inputs must be written in chunks to avoid PTY buffer issues:
+The PTY holds only so much input that ACL2 hasn't read: about 1 KB on
+macOS and 20 KB on Linux.  ACL2 reads a command one form at a time, so
+while it evaluates an early form of a long command, the queue fills and a
+write to the (non-blocking) master fails with EAGAIN.  That is not an
+error.  `_write_input` waits (backing off from 1 ms to 50 ms) and writes
+more as ACL2 reads, yielding to the event loop between writes so the
+reader keeps draining ACL2's output.
 
-```python
-chunk_size = 512  # macOS PIPE_BUF size
-for i in range(0, len(command_bytes), chunk_size):
-    chunk = command_bytes[i:i + chunk_size]
-    written = await loop.run_in_executor(None, os.write, self.master_fd, chunk)
-    await asyncio.sleep(0.001)  # Allow output to drain
-```
+Writing stops early in three cases:
 
-**Why chunking is necessary:**
-- macOS `PIPE_BUF` is only 512 bytes (vs 4096 on Linux)
-- Large single writes cause backpressure when echoed input fills the PTY buffer
-- Inter-chunk delays allow the reader to drain output
+- **Timeout**: the command's timeout covers sending as well as
+  evaluation.  If it expires before the whole command is sent,
+  `evaluate` returns a timeout error that says how much was sent, and
+  ACL2 keeps working, as for any timeout: a background task
+  (`_pending_write`, `_finish_write`) sends the rest as ACL2 reads it.
+  The next command waits for that task before writing, so commands never
+  interleave.
+- **Interrupt**: `interrupt()` increments `interrupt_count`; the writer
+  checks it before each write and stops, since the rest of a command
+  must not follow an interrupt.  The interrupt discards what ACL2 hasn't
+  read, and the log gets an `INPUT CUT SHORT` marker.
+- **Session ended**: `terminate()` cancels a background write before
+  sending `(good-bye)`.
+
+Prompt confirmations are counted only from when the whole command has
+been sent: prompts after a long command's earlier forms can be confirmed
+while the write is still waiting, and must not end the command.
 
 ### Known Limitation: Single-Line Length
 
@@ -183,10 +196,11 @@ input on macOS but ACL2's pending output on Linux.
 ### Send Command
 
 1. Acquire session lock
-2. Log input with timestamp
-3. Write command to PTY master (chunked)
-4. Wait for prompt pattern in output buffer
-5. Return captured output
+2. Wait for any earlier command still being sent
+3. Log input with timestamp
+4. Write command to PTY master, waiting for room as ACL2 reads
+5. Wait for prompt pattern in output buffer
+6. Return captured output
 
 ### End Session
 
