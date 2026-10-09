@@ -92,7 +92,7 @@ fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, winsize)
 flags = fcntl.fcntl(master_fd, fcntl.F_GETFL)
 fcntl.fcntl(master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
 
-# Pass input to ACL2 byte for byte (see Terminal Modes)
+# Pass input to ACL2 unchanged (see Terminal Modes)
 attrs = termios.tcgetattr(slave_fd)
 attrs[0] &= ~termios.IXON
 attrs[3] &= ~(termios.ECHO | termios.ICANON | termios.IEXTEN)

@@ -1329,7 +1329,7 @@ class SessionManager:
             flags = fcntl.fcntl(master_fd, fcntl.F_GETFL)
             fcntl.fcntl(master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
 
-            # Pass input to ACL2 byte for byte.  In canonical mode (ICANON)
+            # Pass input to ACL2 unchanged.  In canonical mode (ICANON)
             # the terminal holds input until a newline, truncates a longer
             # line (1024 bytes on macOS, 4096 on Linux), and edits lines:
             # DEL, C-u and C-w erase, and C-d ends input (at the start of
