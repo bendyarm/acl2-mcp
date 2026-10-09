@@ -1796,8 +1796,10 @@ def xdoc_corpus_search(query: str, full_text: bool, max_results: int) -> str:
 
     if full_text:
         try:
+            # -e keeps a query that starts with "-" from being parsed as
+            # grep options.
             proc = subprocess.run(
-                ["grep", "-r", "-i", "-m", "1", "-F", query,
+                ["grep", "-r", "-i", "-m", "1", "-F", "-e", query,
                  str(corpus / "topics")],
                 capture_output=True, text=True, timeout=60)
             body_lines = []
