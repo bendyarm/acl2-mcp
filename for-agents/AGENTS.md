@@ -55,7 +55,10 @@ Before any online lookup, try the local xdoc agent corpus:
    `ACL2_XDOC_CORPUS` environment variable):
    - discover: `grep -i 'QUERY' $CORPUS/index.tsv`
    - read: open `$CORPUS/topics/<KEY>.txt` (KEY is column 2 of the index)
-   - full-text: `grep -ril 'QUERY' $CORPUS/topics/`
+   - full-text: `grep -ril -e 'QUERY' $CORPUS/topics/` (`-e` keeps a query
+     that starts with `-` from being read as a grep option)
+   - KEY is also the key for the online page below, so with a corpus you
+     never need to construct one
 
 The corpus covers every topic in the built manual but NOT topics defined
 in the current session; use `:doc` via the `evaluate` tool for those.
@@ -84,7 +87,12 @@ Note: The separator between package and symbol is **four underscores** (`____`).
 
 #### Hard-to-Guess Package Mappings
 
-Some symbols are in unexpected packages.  For example:
+Names that print without a package prefix are not all in `ACL2`.  Common Lisp
+symbols imported into `ACL2` (about 200 documented ones, including `defun`,
+`car`, `cons`, `append`, and `let`) have keys starting with `COMMON-LISP____`,
+and a few hundred other topics are in packages such as `X86ISA`, `ACL2-PC`,
+and `RTL`.  A symbol's package is what `symbol-package-name` reports.  For
+example:
 
 ```lisp
 ACL2 !>(symbol-package-name 'symbol-package)
@@ -97,10 +105,14 @@ ACL2 !>(symbol-package-name 'symbol-package-name)
 
 #### How to Look Up Documentation
 
-1. **Determine the package**: Most symbols are in `ACL2`, so if you are not sure, try that.
-   Source files have an `in-package` form at the top.  In the REPL, the ACL2 prompt shows
-   the current package, so if a symbol is usable in that context, you can see
-   its package by calling `symbol-package-name` on it.
+1. **Determine the package**: Look it up rather than guess.
+   - With a local corpus, use the key from column 2 of `index.tsv` as is; only
+     step 2d (prepending the URL) applies.
+   - In an ACL2 session, call `symbol-package-name` on the symbol:
+     `(symbol-package-name 'defun)` returns `"COMMON-LISP"`, not `"ACL2"`.
+   - Otherwise try `ACL2` first, then `COMMON-LISP`.  Source files have an
+     `in-package` form at the top, and the ACL2 prompt shows the current
+     package, which tells you how a symbol written without a prefix is read.
 
 2. **Construct the URL**:
    a. Start with the symbol's package name (e.g., `ACL2`)
@@ -108,14 +120,16 @@ ACL2 !>(symbol-package-name 'symbol-package-name)
    c. Append the `symbol-name`, applying these rules:
       - If the symbol prints without `|...|` bars, upcase it
       - If the symbol prints with `|...|` bars, preserve its case
-      - Keep hyphens as-is
+      - Keep hyphens and periods as-is
       - Replace each other non-alphanumeric character with `_XX`
         where XX is the two hex digits of its ASCII code, reversed
         (e.g., `*` = 0x2A → `_A2`, `+` = 0x2B → `_B2`, space = 0x20 → `_02`)
    d. Prepend `https://acl2.org/doc/index-seo.php?xkey=`
 
    Examples:
+   - `defun` → `COMMON-LISP____DEFUN` (a Common Lisp symbol, so not `ACL2____DEFUN`)
    - `x86isa` → `ACL2____X86ISA`
+   - `5.1 General-Purpose Instructions` → `X86ISA____5.1_02General-Purpose_02Instructions` (periods are kept)
    - `*ACL2-exports*` → `ACL2_____A2ACL2-EXPORTS_A2` (note: five underscores — four for `::` and one that begins `_A2`)
    - `Modeling Algorithms in C++ and ACL2` → `RTL____Modeling_02Algorithms_02in_02C_B2_B2_02and_02ACL2` (a `|...|`-escaped symbol created for a documentation topic, so it has lowercase and spaces)
 

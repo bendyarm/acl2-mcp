@@ -124,7 +124,7 @@ Search the local xdoc agent corpus (the built manual as one plain-text file per 
 
 ### xdoc_show
 
-Show one topic from the local xdoc agent corpus by natural name ('bvplus', 'fty::defbitstruct') or xdoc key ('ACL2____BVPLUS').  Covers every topic in the built manual, but NOT topics defined in the current session (use :doc via evaluate for those).  Needs no ACL2 session.
+Show one topic from the local xdoc agent corpus by natural name ('bvplus', 'fty::defbitstruct', 'acl2::defun') or xdoc key ('ACL2____BVPLUS'); a key with the wrong package is matched by its name part.  Covers every topic in the built manual, but NOT topics defined in the current session (use :doc via evaluate for those).  Needs no ACL2 session.
 
 **Parameters:**
 

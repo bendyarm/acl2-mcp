@@ -1,10 +1,11 @@
 """Tests for the ACL2 MCP server."""
 
+from pathlib import Path
 from typing import Any
 
 import pytest
 
-from acl2_mcp.server import call_tool, list_tools
+from acl2_mcp.server import call_tool, list_tools, xdoc_corpus_show
 
 
 @pytest.mark.asyncio
@@ -91,3 +92,46 @@ async def test_call_tool_certify_book_nonexistent() -> None:
     assert len(result) == 1
     assert result[0].type == "text"
     assert "not found" in result[0].text.lower()
+
+
+@pytest.fixture
+def tiny_corpus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A five-topic xdoc corpus laid out like the real one."""
+    corpus = tmp_path / "corpus"
+    (corpus / "topics").mkdir(parents=True)
+    topics = {
+        "ACL2____BVPLUS": ("bvplus", "Bit-vector sum."),
+        "COMMON-LISP____DEFUN": ("defun", "Define a function symbol"),
+        "FTY____DEFBITSTRUCT": ("fty::defbitstruct", "Define a bitvector type."),
+        "ABNF____PARSE": ("abnf::parse", "ABNF parser."),
+        "PFCS____PARSE": ("pfcs::parse", "PFCS parser."),
+    }
+    (corpus / "index.tsv").write_text(
+        "".join(f"{nat}\t{key}\t{short}\n" for key, (nat, short) in topics.items())
+    )
+    for key, (nat, short) in topics.items():
+        (corpus / "topics" / f"{key}.txt").write_text(f"# {nat}\nKey: {key}\n\n{short}\n")
+    monkeypatch.setenv("ACL2_XDOC_CORPUS", str(corpus))
+    return corpus
+
+
+@pytest.mark.parametrize("name, key", [
+    ("bvplus", "ACL2____BVPLUS"),
+    ("acl2::bvplus", "ACL2____BVPLUS"),
+    ("ACL2::BVPLUS", "ACL2____BVPLUS"),
+    ("acl2::defun", "COMMON-LISP____DEFUN"),
+    ("common-lisp::defun", "COMMON-LISP____DEFUN"),
+    ("ACL2____DEFUN", "COMMON-LISP____DEFUN"),
+    ("ACL2____DEFBITSTRUCT", "FTY____DEFBITSTRUCT"),
+    ("defbitstruct", "FTY____DEFBITSTRUCT"),
+])
+def test_xdoc_show_resolves_names(tiny_corpus: Path, name: str, key: str) -> None:
+    """Package-prefixed names and wrong-package keys find the topic."""
+    assert f"Key: {key}\n" in xdoc_corpus_show(name, 1000)
+
+
+def test_xdoc_show_wrong_package_key_ambiguous(tiny_corpus: Path) -> None:
+    """A wrong-package key matching several topics lists the candidates."""
+    out = xdoc_corpus_show("ACL2____PARSE", 1000)
+    assert out.startswith("Ambiguous")
+    assert "ABNF____PARSE" in out and "PFCS____PARSE" in out

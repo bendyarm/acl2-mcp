@@ -1619,7 +1619,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="xdoc_show",
-            description="Show a topic from the local xdoc agent corpus by name.  Accepts a natural name ('bvplus', 'fty::defbitstruct') or an xdoc key ('ACL2____BVPLUS').  Fast and needs no ACL2 session; covers every topic in the built manual, but NOT topics defined in your own session (use :doc via evaluate for those).  Corpus location: see xdoc_search.",
+            description="Show a topic from the local xdoc agent corpus by name.  Accepts a natural name ('bvplus', 'fty::defbitstruct', 'acl2::defun') or an xdoc key ('ACL2____BVPLUS'); a key with the wrong package is matched by its name part.  Fast and needs no ACL2 session; covers every topic in the built manual, but NOT topics defined in your own session (use :doc via evaluate for those).  Corpus location: see xdoc_search.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1848,12 +1848,25 @@ def xdoc_corpus_show(name: str, max_chars: int) -> str:
     # 2. Resolve as a natural name via the index.
     rows = _xdoc_index_rows(corpus)
     lname = name.lower()
+    # The index lists ACL2 symbols and the Common Lisp symbols imported into
+    # ACL2 without a package prefix (acl2::bvplus as bvplus, acl2::defun as
+    # defun), the way they print from the ACL2 package.
+    for prefix in ("acl2::", "common-lisp::"):
+        if lname.startswith(prefix):
+            lname = lname[len(prefix):]
+            break
     exact = [(nat, key) for (nat, key, _s) in rows if nat.lower() == lname]
     if not exact:
         # A bare name may match a package-qualified topic (defbitstruct ->
         # fty::defbitstruct).
         exact = [(nat, key) for (nat, key, _s) in rows
                  if nat.lower().endswith("::" + lname)]
+    if not exact and "____" in name:
+        # A key with the wrong package, e.g. ACL2____DEFUN for
+        # COMMON-LISP____DEFUN: match on the part after the package.
+        part = name.partition("____")[2].lower()
+        exact = [(nat, key) for (nat, key, _s) in rows
+                 if key.partition("____")[2].lower() == part]
     if len(exact) == 1:
         return read_topic(exact[0][1])
     if len(exact) > 1:
