@@ -58,12 +58,15 @@ The ACL2 MCP server executes arbitrary ACL2 code provided by the client. This is
 
 **Resource Limits**:
 - Maximum 50 concurrent sessions server-wide
-- Sessions auto-terminate after 30 minutes of inactivity
+- Idle sessions are not terminated (`SESSION_INACTIVITY_TIMEOUT = None`
+  in `server.py`; set it to enable idle cleanup)
 
 **Timeout Protection**:
-- True total timeout (not per-line) prevents slow-read attacks
-- Cryptographically random markers prevent injection
-- Timeout applies to every session command
+- A timeout applies only when the caller gives one (clamped to 1-300
+  seconds); without one, a command waits until ACL2 returns to its prompt
+- The timeout is a total one (not per line), covering both sending the
+  command and evaluating it
+- A timeout stops the wait, not ACL2; `interrupt_session` stops ACL2
 
 **Concurrency Protection**:
 - Per-session locks prevent concurrent access

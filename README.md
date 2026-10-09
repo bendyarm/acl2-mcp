@@ -344,7 +344,7 @@ Arguments:
 - ✅ Build complex proofs incrementally
 - ✅ Try different proof strategies without re-submitting entire files
 - ✅ Set checkpoints (`deflabel`) and return to them (`:ubu`) while experimenting
-- ⚡ Sessions auto-timeout after 30 minutes of inactivity
+- ✅ Sessions last until you end them (idle sessions are not cleaned up)
 
 ### Evaluating ACL2 Code
 
@@ -410,13 +410,15 @@ Every tool that runs ACL2 code runs it in a persistent session:
 1. `start_session` creates a long-running ACL2 process using a PTY
 2. Each tool call sends commands to the existing process and reads responses
 3. The ACL2 world state accumulates across multiple commands
-4. Sessions auto-cleanup after 30 minutes of inactivity or when explicitly ended
+4. Sessions last until they are ended, or until the MCP server exits
 5. Up to 50 concurrent sessions are supported
 
 For a throwaway experiment in a clean ACL2 world, start a second session
 and end it when you are done.
 
-Default timeout is 30 seconds per command, configurable per request.
+There is no default timeout: without one, a command waits until ACL2
+returns to its prompt.  A `timeout` (1 to 300 seconds) stops the wait,
+not ACL2; use `interrupt_session` to stop ACL2.
 
 ## Registering the MCP with Codex
 

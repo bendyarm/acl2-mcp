@@ -1590,7 +1590,7 @@ async def list_tools() -> list[Tool]:
     return [
         Tool(
             name="start_session",
-            description="Start a new persistent ACL2 session. This creates a long-running ACL2 process that maintains state across multiple tool calls. Use this when you want to incrementally build up definitions and theorems without having to wrap everything in progn.",
+            description="Start a persistent ACL2 session, whose world (definitions, theorems, included books) lasts across evaluate calls. All ACL2 evaluation happens in a session. For a clean world, start a separate session and end it when done. Returns the session ID and the session log's path.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1615,14 +1615,14 @@ async def list_tools() -> list[Tool]:
                     },
                     "cwd": {
                         "type": "string",
-                        "description": "Optional working directory for the ACL2 process. If not specified, uses the current directory. Example: '/Users/user/acl2/books/kestrel/axe/x86/examples/switch'",
+                        "description": "Optional working directory for the ACL2 process; relative include-book and ld paths are resolved against it. If not specified, uses the MCP server's working directory. Example: '/Users/user/acl2/books/kestrel/axe/x86/examples/switch'",
                     },
                 },
             },
         ),
         Tool(
             name="end_session",
-            description="End a persistent ACL2 session and clean up resources. Use this when you're done with incremental development.",
+            description="End an ACL2 session; its world is lost (a busy ACL2 is killed). Don't end a session just because a command timed out or failed; the session is usually fine (see interrupt_session).",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1663,7 +1663,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="interrupt_session",
-            description="Send SIGINT (Ctrl-C) to interrupt a running ACL2 command in a session. Use this when ACL2 gets stuck in an infinite loop or a proof attempt is taking too long. This is equivalent to pressing Ctrl-C in an interactive ACL2 session.",
+            description="Interrupt ACL2 like Ctrl-C: aborts the form being evaluated and discards any part of the command ACL2 hasn't read yet. The session and its world remain. Use it when a proof or computation takes too long, rather than ending the session. Returns once the interrupt is sent; ACL2's abort message appears at the start of the next evaluate reply.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1677,7 +1677,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="evaluate",
-            description="Evaluate ACL2 expressions or define functions (defun). Use this for: 1) Defining functions, 2) Computing values, 3) Testing expressions. Example: (defun factorial (n) (if (zp n) 1 (* n (factorial (- n 1))))) or (+ 1 2). Returns the ACL2 evaluation result.",
+            description="Send code to an ACL2 session as if typed at its prompt: events (defun, defthm, include-book, deflabel), expressions, and keyword commands (:pe, :pbt, :u, :ubu). Several forms per call are fine. Returns ACL2's output up to its next prompt; look in it for 'ACL2 Error' or 'FAILED' (a failed event changes nothing). Long output is shortened; the session log has all of it. Keep each line under 1,000 bytes.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1687,7 +1687,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "timeout": {
                         "type": "number",
-                        "description": "Timeout in seconds (optional, no timeout if not specified)",
+                        "description": "Seconds to wait for the whole command (no limit if not given). On a timeout ACL2 is not interrupted: it keeps working (a command not yet fully sent is still sent), and its later output appears in the session log and at the start of the next reply. Check the log, then wait or call interrupt_session; don't end the session.",
                     },
                     "session_id": {
                         "type": "string",
@@ -1699,13 +1699,13 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="certify_book",
-            description="Certify ACL2 books using cert.pl with parallel compilation. This verifies all proofs and creates certificates for books. Book path can be relative or absolute, WITHOUT .lisp extension (e.g., 'books/kestrel/axe/top' not 'books/kestrel/axe/top.lisp'). If jobs parameter is not specified, automatically detects optimal number based on CPU count and current system load.",
+            description="Certify ACL2 books using cert.pl with parallel compilation. This verifies all proofs and creates certificates for books. Runs cert.pl as a separate process; sessions are not affected. Book path WITHOUT .lisp extension (e.g., '/path/to/books/kestrel/axe/top' not '.../top.lisp'). If jobs parameter is not specified, automatically detects optimal number based on CPU count and current system load.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Path to the book WITHOUT .lisp extension. Can be relative (e.g., 'books/kestrel/axe/top') or absolute. Relative paths are relative to current directory.",
+                        "description": "Path to the book WITHOUT .lisp extension. Use an absolute path: a relative one is resolved against the MCP server's working directory, not a session's.",
                     },
                     "jobs": {
                         "type": "number",
@@ -1713,7 +1713,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "timeout": {
                         "type": "number",
-                        "description": "Timeout in seconds (optional, no timeout if not specified)",
+                        "description": "Timeout in seconds (optional, no timeout if not specified). Unlike evaluate's timeout, this kills cert.pl.",
                     },
                 },
                 "required": ["file_path"],

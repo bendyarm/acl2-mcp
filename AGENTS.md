@@ -31,7 +31,7 @@ long-running ACL2 process:
 - Managed by `SessionManager` (singleton: `session_manager`)
 - Uses PTY for bidirectional communication (see `docs/architecture.md` for architecture)
 - Sessions maintain ACL2 world state across commands
-- Auto-cleanup after 30 minutes inactivity
+- No idle cleanup (`SESSION_INACTIVITY_TIMEOUT = None`); sessions last until ended
 - Max 50 concurrent sessions
 
 For a throwaway clean world, a client starts a separate session and ends
