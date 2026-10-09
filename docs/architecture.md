@@ -212,6 +212,17 @@ through the master fd discards the input on macOS but ACL2's pending
 output on Linux.  The fallback is for a Ctrl-C that still can't be
 written.
 
+`interrupt()` then waits up to `INTERRUPT_WAIT_SECONDS` (5) for a prompt
+confirmed after the interrupt, as `send_command` waits for its command's
+prompt, and returns the output since the interrupt: ACL2's abort
+message.  Usually the `evaluate` call being interrupted has already timed
+out, so no other reply would show that message, and returning only at
+the prompt keeps the next command from taking it as its own.  It doesn't
+take the session lock, so an `evaluate` still waiting gets the abort
+message too.  In a proof, the first interrupt only asks ACL2 to stop at
+its next check (`:DOC abort-soft`); when no prompt comes, the reply says
+to interrupt again.
+
 ## Session Lifecycle
 
 ### Start Session

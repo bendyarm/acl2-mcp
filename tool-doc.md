@@ -60,7 +60,7 @@ None
 
 ### interrupt_session
 
-Interrupt ACL2 like Ctrl-C: aborts the form being evaluated and discards any part of the command ACL2 hasn't read yet. The session and its world remain. Use it when a proof or computation takes too long, rather than ending the session. Returns once the interrupt is sent; ACL2's abort message appears at the start of the next evaluate reply.
+Interrupt ACL2 like Ctrl-C: aborts the form being evaluated and discards any part of the command ACL2 hasn't read yet. The session and its world remain. Use it when a proof or computation takes too long, rather than ending the session. Waits up to 5 seconds for ACL2 to get back to its prompt, and returns what ACL2 printed (its abort message). In a proof, the first interrupt may only ask ACL2 to stop at its next check: if the reply says ACL2 isn't back at its prompt, call interrupt_session again.
 
 **Parameters:**
 

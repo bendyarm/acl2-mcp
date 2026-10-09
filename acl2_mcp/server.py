@@ -85,6 +85,11 @@ def elide_large_output(output: str, config: ToolOutputConfig, log_file: Path | N
 # output lines that happen to match a prompt pattern.
 PROMPT_SETTLE_SECONDS = 0.2
 
+# How long interrupt_session waits for ACL2's prompt after the interrupt.
+# An abort takes well under a second; in a proof, the first interrupt only
+# asks ACL2 to stop at its next check, which may take longer or never come.
+INTERRUPT_WAIT_SECONDS = 5
+
 # Prompt patterns for detecting command completion.
 #
 # These are the "positive" patterns from emacs-acl2.el *acl2-insert-pats*
@@ -568,8 +573,13 @@ class ACL2Session:
         it anyway.  If the Ctrl-C still cannot be written, send SIGINT to
         the process group.
 
+        Then wait up to INTERRUPT_WAIT_SECONDS for ACL2's prompt, and return
+        what ACL2 printed in response (its abort message).  An evaluate
+        call that timed out has already returned, so no other reply would
+        show it.
+
         Returns:
-            Status message indicating success or failure
+            Status message and ACL2's response, or an error message
         """
         try:
             if self.master_fd is None:
@@ -581,6 +591,10 @@ class ACL2Session:
             # Stop any command still being written (see _write_input): its
             # rest must not follow the interrupt.
             self.interrupt_count += 1
+
+            # Output and prompts from here on are ACL2's response
+            start_seq_id = self.sequence_counter
+            start_prompt_seq = self.prompt_seq
 
             # On Linux the terminal acts on an input byte only once the
             # input ahead of it has been read, so a Ctrl-C behind unread
@@ -594,41 +608,61 @@ class ACL2Session:
             # converts it to SIGINT for the foreground process group
             try:
                 os.write(self.master_fd, b"\x03")  # non-blocking fd
-
-                # Log the interrupt in the session
-                timestamp = time.monotonic()
-                seq_id = await self._get_next_sequence_id()
-                interrupt_time = time.strftime("%Y-%m-%d %H:%M:%S")
-                marker = f"[{interrupt_time} INTERRUPT SENT]\n"
-                await self.merge_queue.put((timestamp, seq_id, "stdout", marker))
-
-                return "Interrupt signal sent via PTY"
-
+                sent, marker = "Interrupt sent", "INTERRUPT SENT"
             except OSError:
                 # PTY write failed (say, the flush failed and the input
-                # queue is still full); try fallback method
-                pass
+                # queue is still full).  Fallback method: Send SIGINT to
+                # the process group
+                try:
+                    pgid = os.getpgid(self.process.pid)
+                    os.killpg(pgid, signal.SIGINT)
+                except (ProcessLookupError, PermissionError) as e:
+                    return f"Error: Failed to interrupt session: {e}"
+                sent = "Interrupt sent (as SIGINT)"
+                marker = "INTERRUPT SENT (FALLBACK)"
 
-            # Fallback method: Send SIGINT to the process group
-            try:
-                # Get the process group ID and send SIGINT
-                pgid = os.getpgid(self.process.pid)
-                os.killpg(pgid, signal.SIGINT)
+            # Log the interrupt in the session
+            timestamp = time.monotonic()
+            seq_id = await self._get_next_sequence_id()
+            interrupt_time = time.strftime("%Y-%m-%d %H:%M:%S")
+            await self.merge_queue.put(
+                (timestamp, seq_id, "stdout", f"[{interrupt_time} {marker}]\n"))
 
-                # Log the interrupt
-                timestamp = time.monotonic()
-                seq_id = await self._get_next_sequence_id()
-                interrupt_time = time.strftime("%Y-%m-%d %H:%M:%S")
-                marker = f"[{interrupt_time} INTERRUPT SENT (FALLBACK)]\n"
-                await self.merge_queue.put((timestamp, seq_id, "stdout", marker))
-
-                return "Interrupt signal sent via SIGINT (fallback)"
-
-            except (ProcessLookupError, PermissionError) as e:
-                return f"Error: Failed to interrupt session: {e}"
+            at_prompt = await self._wait_for_prompt_after(
+                start_prompt_seq, INTERRUPT_WAIT_SECONDS)
+            # Let the logger task move the prompt into output_buffer
+            await asyncio.sleep(0.05)
+            output = "".join(line for sid, line in self.output_buffer
+                             if sid >= start_seq_id).strip()
+            output = elide_large_output(output, self.tool_output_config,
+                                        self.log_file)
+            if at_prompt:
+                return f"{sent}; ACL2 is back at its prompt:\n\n{output}"
+            return (f"{sent}, but ACL2 has not returned to its prompt within "
+                    f"{INTERRUPT_WAIT_SECONDS} seconds.  In a proof, the first "
+                    f"interrupt only asks ACL2 to stop at its next check; call "
+                    f"interrupt_session again to abort at once.  Output so "
+                    f"far:\n\n{output}")
 
         except Exception as e:
             return f"Error: Failed to interrupt session: {e}"
+
+    async def _wait_for_prompt_after(self, start_prompt_seq: int,
+                                     timeout: float) -> bool:
+        """Wait up to TIMEOUT seconds for a prompt confirmed after
+        START_PROMPT_SEQ (a value of prompt_seq).  Returns whether one was."""
+        deadline = time.monotonic() + timeout
+        async with self.prompt_condition:
+            while self.prompt_seq <= start_prompt_seq:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or self.shutdown_event.is_set():
+                    return False
+                try:
+                    await asyncio.wait_for(self.prompt_condition.wait(),
+                                           timeout=min(remaining, 1.0))
+                except asyncio.TimeoutError:
+                    pass
+        return True
 
     async def _get_next_sequence_id(self) -> int:
         """Get the next sequence ID for ordering output lines."""
@@ -1690,7 +1724,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="interrupt_session",
-            description="Interrupt ACL2 like Ctrl-C: aborts the form being evaluated and discards any part of the command ACL2 hasn't read yet. The session and its world remain. Use it when a proof or computation takes too long, rather than ending the session. Returns once the interrupt is sent; ACL2's abort message appears at the start of the next evaluate reply.",
+            description="Interrupt ACL2 like Ctrl-C: aborts the form being evaluated and discards any part of the command ACL2 hasn't read yet. The session and its world remain. Use it when a proof or computation takes too long, rather than ending the session. Waits up to 5 seconds for ACL2 to get back to its prompt, and returns what ACL2 printed (its abort message). In a proof, the first interrupt may only ask ACL2 to stop at its next check: if the reply says ACL2 isn't back at its prompt, call interrupt_session again.",
             inputSchema={
                 "type": "object",
                 "properties": {

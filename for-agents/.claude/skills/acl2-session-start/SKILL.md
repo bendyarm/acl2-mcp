@@ -99,11 +99,11 @@ independent.  To try something on top of your current world instead, set a
 - A proof is churning with way too many subgoals
 - Use `mcp__acl2__interrupt_session` to send Ctrl-C
 
-**After sending an interrupt**, check if the session is responsive:
-- Send an innocuous command like `t` or `(+ 1 1)` to verify ACL2 is responding, or if there is a session log, you can tail it to see the current status.
+**After sending an interrupt**, read its reply, which shows ACL2's response:
+- "ACL2 is back at its prompt": the session is fine; continue working.
+- "has not returned to its prompt": in a proof, the first interrupt only asks ACL2 to stop at its next check, so call `mcp__acl2__interrupt_session` again. Otherwise, check the session log to see what ACL2 is doing.
 - **NEVER** use `:good-bye`, `:q`, or `(quit)` to "check" status - these will exit ACL2!
-- If the session responds, you can continue working
-- If it doesn't respond, you may need to end the session and start fresh
+- If ACL2 still doesn't get back to its prompt, you may need to end the session and start fresh
 
 **When ending a session is appropriate** (rare):
 - You're completely done with ACL2 work

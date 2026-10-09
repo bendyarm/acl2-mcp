@@ -297,7 +297,8 @@ async def test_interrupt_with_full_input_queue(session_id: str) -> None:
     await asyncio.sleep(1)
 
     result = await call_tool("interrupt_session", {"session_id": session_id})
-    assert "Interrupt signal sent via PTY" in result[0].text
+    # (not "Interrupt sent (as SIGINT)", the fallback)
+    assert result[0].text.startswith("Interrupt sent; ACL2 is back at its prompt")
 
     result = await evaluation
     assert "interrupted before the whole command was sent" in result[0].text
@@ -395,11 +396,12 @@ async def test_interrupt_stops_sending_rest_of_command(
         "session_id": session_id, "code": code, "timeout": 1})
     assert "the rest will be sent" in result[0].text
 
+    # interrupt_session returns ACL2's abort message (the timed-out
+    # evaluate can't), and only once ACL2 is back at its prompt, so that
+    # the next command doesn't take that prompt as its own
     result = await call_tool("interrupt_session", {"session_id": session_id})
-    assert "Interrupt signal sent" in result[0].text
-    # interrupt_session returns before ACL2 prints its abort message and
-    # prompt; a command sent sooner would take that prompt as its own.
-    await asyncio.sleep(2)
+    assert result[0].text.startswith("Interrupt sent; ACL2 is back at its prompt")
+    assert "ABORTING" in result[0].text
 
     result = await call_tool("evaluate", {
         "session_id": session_id, "code": "(+ 1000 337)", "timeout": 10})
@@ -433,11 +435,38 @@ async def test_interrupt_while_rest_of_command_unread(session_id: str) -> None:
 
     start = time.monotonic()
     result = await call_tool("interrupt_session", {"session_id": session_id})
-    assert "Interrupt signal sent" in result[0].text
+    assert result[0].text.startswith("Interrupt sent; ACL2 is back at its prompt")
     result = await evaluation
     assert time.monotonic() - start < 10
     assert "ABORTING" in result[0].text
     assert ":LAST-FORM-DONE" not in result[0].text
+
+
+@pytest.mark.asyncio
+async def test_interrupt_proof_twice(session_id: str) -> None:
+    """In a proof, the first interrupt only asks ACL2 to stop at its next
+    check; interrupt_session says so when ACL2 doesn't get back to its
+    prompt, and a second interrupt aborts the proof."""
+    for code in ["(+ 1000 337)",  # let ACL2 finish starting up
+                 "(defun count-up (n acc) (if (zp n) acc (count-up (1- n) (1+ acc))))"]:
+        await call_tool("evaluate", {
+            "session_id": session_id, "code": code, "timeout": 30})
+    # Proving this means evaluating the call, which never checks for an
+    # interrupt
+    result = await call_tool("evaluate", {
+        "session_id": session_id, "timeout": 2,
+        "code": "(thm (equal (count-up 100000000000 0) 100000000000))"})
+    assert "timed out" in result[0].text
+
+    result = await call_tool("interrupt_session", {"session_id": session_id})
+    assert "has not returned to its prompt" in result[0].text
+    assert "call interrupt_session again" in result[0].text
+    result = await call_tool("interrupt_session", {"session_id": session_id})
+    assert result[0].text.startswith("Interrupt sent; ACL2 is back at its prompt")
+
+    result = await call_tool("evaluate", {
+        "session_id": session_id, "code": "(+ 1000 337)", "timeout": 10})
+    assert "1337" in result[0].text
 
 
 async def process_group_exits(pgid: int, timeout: float = 5.0) -> bool:
