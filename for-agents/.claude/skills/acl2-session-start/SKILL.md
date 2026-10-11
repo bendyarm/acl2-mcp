@@ -111,7 +111,7 @@ independent.  To try something on top of your current world instead, set a
 - The session process has actually crashed (not just timed out)
 - You're done with a scratch session (see Scratch Sessions above)
 
-**On timeout**: Check the session log (`tail -20 <log-file>`) to see if ACL2 actually responded. A timeout often means the MCP server missed the prompt, not that ACL2 is stuck. You can usually just continue with the next command.
+**On timeout**: ACL2 keeps working on the command; check the session log (`tail -20 <log-file>`) to see how it is doing. The next `mcp__acl2__evaluate` waits for it to finish (within its own timeout) and shows its output first. To stop it instead, call `mcp__acl2__interrupt_session`.
 
 ## Monitoring Long-Running Operations
 

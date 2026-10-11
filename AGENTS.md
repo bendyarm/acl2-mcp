@@ -23,6 +23,9 @@ This is an MCP (Model Context Protocol) server that provides tools for interacti
   - Book certification (`certify_acl2_book()`, which runs `cert.pl`)
   - Session management (`SessionManager`, `ACL2Session`)
   - Security validation functions (timeout, session name, integer bounds)
+- **[acl2_mcp/reader.py](acl2_mcp/reader.py)**: ACL2's reader syntax: a lexer and
+  a splitter into top-level forms, following the ABNF grammar in the community
+  books (`books/kestrel/acl2pl/grammar.abnf`) where it agrees with ACL2's reader
 
 ### Sessions
 
@@ -40,10 +43,15 @@ it afterwards.
 ### Session Communication
 
 Sessions use prompt detection to identify command completion:
-- Commands sent via PTY master, waiting for room as ACL2 reads (a long command can exceed the PTY input queue)
+- Commands are split into top-level forms (`acl2_mcp/reader.py`) and sent via
+  the PTY master one form at a time, each once ACL2 has printed its prompt
+  after the one before; unreadable code is rejected before anything is sent
 - Background reader continuously captures output to a buffer
 - `send_command()` waits for prompt patterns to appear in output
-- Prompt patterns match ACL2 (`.*>[ ]*$`), SBCL debugger (`.*\] $`), and raw Lisp (`.*\* $`)
+- Prompt patterns match ACL2 (`.*>[ ]*$`, which covers break-rewrite,
+  wormholes, and CCL's debugger and inspector), the proof builder (`->: `),
+  ACL2 queries, walkabout (`:`), SBCL's debugger (`.*\] $`), and raw Lisp
+  (`.*\* $` SBCL, `? ` CCL); on a timeout, an unknown prompt is adopted
 - Based on Emacs `emacs-acl2.el` prompt detection
 - See `docs/architecture.md` for full details
 
@@ -97,6 +105,10 @@ Test organization:
 - **[tests/test_server.py](tests/test_server.py)**: Core functionality tests (tools, ACL2 execution)
 - **[tests/test_security.py](tests/test_security.py)**: Security validation tests
 - **[tests/test_sessions.py](tests/test_sessions.py)**: Session management tests
+- **[tests/test_reader.py](tests/test_reader.py)**: Tests of the reader module's interface
+- **[tests/test_reader_vs_acl2.py](tests/test_reader_vs_acl2.py)**: Compares the reader
+  with ACL2's own reader (runs `acl2` in batch), on snippets and on
+  `books/kestrel/acl2pl/reader-tests.lisp` and `*.tests` when present
 
 All tests use `pytest-asyncio` for async testing.
 

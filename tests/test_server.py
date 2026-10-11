@@ -202,8 +202,8 @@ def test_sighup_ends_sessions_and_certifications(
         for _ in range(50):  # the session's ACL2 is gone
             try:
                 os.killpg(acl2, 0)
-            except ProcessLookupError:
-                break
+            except (ProcessLookupError, PermissionError):
+                break  # (PermissionError: the ID was reused by another user)
             time.sleep(0.1)
         else:
             pytest.fail("the session's ACL2 is still running")

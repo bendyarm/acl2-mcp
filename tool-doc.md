@@ -83,13 +83,14 @@ Show the session log in a terminal window. If a Terminal window is already taili
 
 ### evaluate
 
-Send code to an ACL2 session as if typed at its prompt: events (defun, defthm, include-book, deflabel), expressions, and keyword commands (:pe, :pbt, :u, :ubu). Several forms per call are fine. Returns ACL2's output up to its next prompt; look in it for 'ACL2 Error' or 'FAILED' (a failed event changes nothing). Long output is shortened; the session log has all of it.
+Send code to an ACL2 session as if typed at its prompt: events (defun, defthm, include-book, deflabel), expressions, and keyword commands (:pe, :pbt, :u, :ubu). Several forms per call are fine: each is sent once ACL2 has finished the one before, and the reply is ACL2's output up to its prompt after the last; look in it for 'ACL2 Error' or 'FAILED' (a failed event changes nothing). Code that ACL2 can't read, such as a form missing its ), is rejected and none of it is sent. Long output is shortened; the session log has all of it.
 
 **Parameters:**
 
 - `code` (required): ACL2 code to evaluate
-- `timeout` (optional): Seconds to wait for the whole command (no limit if not given). On a timeout ACL2 is not interrupted: it keeps working (a command not yet fully sent is still sent), and its later output appears in the session log and at the start of the next reply. Check the log, then wait or call interrupt_session; don't end the session.
+- `timeout` (optional): Seconds to wait for the whole command (no limit if not given). On a timeout ACL2 is not interrupted: it keeps working (the rest of a command not yet fully sent is still sent), and the next evaluate waits for it to finish and shows its output first. Check the session log, then wait or call interrupt_session; don't end the session.
 - `session_id` (required): ID of the session to use
+- `as_is` (optional): Send the code exactly as given, in one piece, without reading it as ACL2 code: for a program that reads its own kind of input (default false).
 
 ---
 

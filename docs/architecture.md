@@ -69,11 +69,39 @@ The server detects command completion by matching prompt patterns (based on Emac
 
 ```python
 PROMPT_PATTERNS = [
-    r'.*>[ ]*$',    # ACL2, GCL, CLISP, LispWorks, CCL debugger
+    r'.*>[ ]*$',    # ACL2 (also break-rewrite "1 ACL2 >"), GCL, CLISP,
+                    # LispWorks, CCL debugger
     r'.*\] $',      # SBCL debugger (e.g., "0] ")
     r'.*\* $',      # CMUCL, SBCL raw Lisp (e.g., "* ")
+    r'\? $',        # CCL raw Lisp
+    r'-+>: $',      # ACL2 proof builder ("->: ", nested "-->: ")
+    r'.*\):  $',    # ACL2 query ("ACL2 Query (:ID):  ...  (Y or N):  ")
+    r':$',          # ACL2 walkabout
 ]
 ```
+
+Other read loops these match: break-rewrite (`1 ACL2 >`), a wormhole
+(`Wormhole ACL2 !>`), nested LD (`ACL2 !>>`), SBCL's nested debugger
+(`0[2] `) and inspector (`> `), CCL's debugger (`1 > `, `2 > `) and
+inspector (`Inspect> `, `Inspect 1> `).  A prompt none of them knows
+costs a timeout: then, if ACL2's output ends with an unfinished line,
+printed after the last form was sent and quiet for
+`UNKNOWN_PROMPT_SECONDS`, `_adopt_pending_prompt` takes it for the
+prompt, so later commands are sent there (whole).  A read with no
+visible prompt can't be told from a slow, silent command;
+`interrupt_session` gets out of it.
+
+A prompt is a candidate when ACL2's output so far ends with it (no
+newline after it).  It is confirmed once no more output arrives for
+`PROMPT_SETTLE_SECONDS` (0.2), and only at a depth (count of trailing
+`>`) no deeper than the prompt before the command, so that the prompts
+of `(ld "file")` don't end a command.
+
+`prompt_mode` tells how input is read at a prompt: by ACL2's reader at
+an ACL2 loop prompt (`PKG MODE>`, also in break-rewrite and a wormhole),
+the proof builder's, or a query's; by ACL2's reader without its object
+check in raw mode (`ACL2 P>`); or by the host Lisp's own reader in raw
+Lisp and debuggers.
 
 ## PTY Setup
 
@@ -148,35 +176,63 @@ env["LINES"] = "24"
 
 ## Sending Commands
 
-### Writing a Command
+### One Form at a Time
 
-The PTY holds only so much input that ACL2 hasn't read: about 1 KB on
-macOS and 20 KB on Linux.  ACL2 reads a command one form at a time, so
-while it evaluates an early form of a long command, the queue fills and a
-write to the (non-blocking) master fails with EAGAIN.  That is not an
-error.  `_write_input` waits (backing off from 1 ms to 50 ms) and writes
-more as ACL2 reads, yielding to the event loop between writes so the
-reader keeps draining ACL2's output.
+`send_command` sends a command one top-level form at a time, each once
+ACL2 has finished the one before, and replies at the prompt after the
+last.  Sent all at once, a command's reply ended at the first prompt
+that settled: a later form that was slow and printed nothing (a
+`(sleep 3)`, or a `defthm` proved without checkpoints) left its result
+for the next reply.
 
-Writing stops early in three cases:
+- **Splitting** (`_plan_units`): `acl2_mcp/reader.py` reads the code's
+  top-level forms with ACL2's syntax (see its docstring).  Each unit
+  sent is a form with the text before it; a keyword command takes the
+  rest of its line, since ACL2 reads as many arguments after it as the
+  command takes in ACL2's world.  A newline after a unit ends its last
+  token.
+- **Rejection**: code that ACL2's reader would reject (a syntax error, a
+  form missing its `)`, a float outside raw mode) is not sent at all;
+  the reply says where, and the log shows the input with a `NOT SENT`
+  marker.  A form left incomplete would otherwise have ACL2 wait for its
+  rest and swallow the next command.
+- **Whole**: at a raw Lisp or debugger prompt the host Lisp reads the
+  code with its own syntax, so it is sent whole, as it is when a
+  top-level `#+`/`#-` (whose form may be skipped) or syntax the reader
+  doesn't handle (`#Y`, `#Z`, vectors) leaves the forms uncertain, and
+  when `evaluate` is given `as_is`: input for a program with its own
+  read loop needn't be Lisp at all.  Such a program's prompt is told
+  from ACL2's by its package part, since ACL2 package names have no
+  lower case letters; one that still looks like ACL2's needs `as_is`.
+- **Stepping** (`_send_units`): a unit is finished when a prompt
+  candidate appears after it was sent (`candidate_seq` counts them, each
+  once, at an allowed depth).  No settle delay is needed there.
+- **Stale prompts**: `_sends` counts the units sent.  A prompt seen
+  before the latest send can't be that unit's, so `_flush_prompt`
+  doesn't confirm it, even if it settles after the send.
+- **Long units**: the PTY holds only so much input that ACL2 hasn't
+  read: about 1 KB on macOS and 20 KB on Linux.  `_write_input` writes a
+  unit as ACL2 reads, waiting on EAGAIN (backing off from 1 ms to 50 ms)
+  and yielding to the event loop so the reader keeps draining output.
 
-- **Timeout**: the command's timeout covers sending as well as
-  evaluation.  If it expires before the whole command is sent,
-  `evaluate` returns a timeout error that says how much was sent, and
-  ACL2 keeps working, as for any timeout: a background task
-  (`_pending_write`, `_finish_write`) sends the rest as ACL2 reads it.
-  The next command waits for that task before writing, so commands never
-  interleave.
-- **Interrupt**: `interrupt()` increments `interrupt_count`; the writer
+Sending stops early in three cases:
+
+- **Timeout**: the command's timeout covers waiting for an earlier
+  command, sending, and evaluation.  On a timeout ACL2 keeps working:
+  a background task (`_pending_send`, `_finish_command`) sends the rest
+  of the command as ACL2 finishes each form, then waits for the prompt
+  after the last.  The next command waits for that task (within its own
+  timeout), and its reply shows the earlier command's output first
+  (`_unreported_from`, `_take_unreported_output`).  If ACL2's output ends
+  with a prompt that doesn't count, such as the depth-2 prompt of
+  `(ld *standard-oi*)`, ACL2 is waiting for input there:
+  `_adopt_pending_prompt` makes it the current prompt.
+- **Interrupt**: `interrupt()` increments `interrupt_count`; sending
   checks it before each write and stops, since the rest of a command
-  must not follow an interrupt.  The interrupt discards what ACL2 hasn't
-  read, and the log gets an `INPUT CUT SHORT` marker.
-- **Session ended**: `terminate()` cancels a background write before
+  must not follow an interrupt, and the log gets an `INPUT CUT SHORT`
+  marker.
+- **Session ended**: `terminate()` cancels a background send before
   sending `(good-bye)`.
-
-Prompt confirmations are counted only from when the whole command has
-been sent: prompts after a long command's earlier forms can be confirmed
-while the write is still waiting, and must not end the command.
 
 ## Interrupt Handling
 
@@ -233,16 +289,22 @@ to interrupt again.
 4. Close slave in parent (child inherited it)
 5. Register event-driven reader on master
 6. Start logger task
-7. Wait for initial ACL2 prompt
+7. Wait for ACL2's first confirmed prompt (one that settles): an
+   `acl2-customization` file loads after a first prompt, in a nested LD,
+   and a command sent at that prompt would take the prompt after the
+   file for its own
+8. Take the reader's syntax from the host Lisp (CCL's banner says
+   "Welcome to Clozure Common Lisp")
 
 ### Send Command
 
 1. Acquire session lock
-2. Wait for any earlier command still being sent
-3. Log input with timestamp
-4. Write command to PTY master, waiting for room as ACL2 reads
-5. Wait for prompt pattern in output buffer
-6. Return captured output
+2. Wait for an earlier command that timed out to finish
+3. Split the command into forms, or reject it
+4. Log input with timestamp
+5. Send the forms one at a time (see One Form at a Time)
+6. Wait for the prompt after the last form
+7. Return the earlier command's output, if any, and this one's
 
 ### End Session
 
@@ -266,6 +328,30 @@ crash): the reader's EOF or EIO logs the `SESSION ENDED` marker and
 closes the log viewer.  The viewer is closed once, whichever comes
 first; `log_viewer_opened` arranges it when `start_session` or
 `show_session_log` opens one.
+
+On macOS the viewer is a Terminal window whose shell execs a `sh`
+wrapper around `tail -f` that exits cleanly on SIGTERM.  The script
+that opens it titles the tab that `do script` returns (not the front
+window, which may be another).  The scripts that open and show windows
+run one at a time, in order, in a thread, so that `show_session_log`
+called right after `start_session` finds the window that
+`start_session` opened.  `close_log_viewer` (in a thread) drops the
+session's scripts that haven't run yet (they would open a window for an
+ended session), waits for one that is running, and so knows how many
+windows may have been opened (a script that failed, say because
+Terminal didn't answer in time, may have opened one).  It finds their wrappers with `pgrep`, takes each
+one's tty from `ps`, finds the window with that title and tty while the
+wrapper still runs, stops the wrapper, and closes the window by its id
+only once `ps` shows nothing running on that tty and the window's
+history ends with "[Process completed]" (Terminal has noticed; a window
+in the background doesn't update its `contents`, so the history is
+read).  Terminal asks "terminate running processes?" when asked to
+close a window that runs something, and what it reports about a tab
+(its tty, its processes) can be stale, so none of that is trusted; when
+in doubt the window stays open.  Nothing is ever typed into a window.
+The wrapper's `pgrep` pattern is anchored at the start of the command
+line, so that it can't match the `osascript` processes, whose arguments
+mention the log too.
 
 ## Book Certification
 

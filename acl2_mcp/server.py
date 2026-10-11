@@ -8,6 +8,7 @@ import functools
 import os
 import platform
 import pty
+import queue
 import re
 import shlex
 import signal
@@ -15,6 +16,7 @@ import struct
 import subprocess
 import sys
 import termios
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -25,6 +27,7 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
+from acl2_mcp import reader
 from acl2_mcp.config import ServerConfig, ToolOutputConfig, load_config
 
 
@@ -85,6 +88,11 @@ def elide_large_output(output: str, config: ToolOutputConfig, log_file: Path | N
 # output lines that happen to match a prompt pattern.
 PROMPT_SETTLE_SECONDS = 0.2
 
+# On a timeout, output that ends with an unfinished line and has been
+# quiet this long is taken for a prompt that PROMPT_PATTERNS doesn't know
+# (see _adopt_pending_prompt).
+UNKNOWN_PROMPT_SECONDS = 1.0
+
 # How long interrupt_session waits for ACL2's prompt after the interrupt.
 # An abort takes well under a second; in a proof, the first interrupt only
 # asks ACL2 to stop at its next check, which may take longer or never come.
@@ -99,12 +107,50 @@ INTERRUPT_WAIT_SECONDS = 5
 # Because these patterns are broad (especially ".*>[ ]*$" and ".*\* $"),
 # prompt detection uses a settle delay (PROMPT_SETTLE_SECONDS) to
 # distinguish real prompts from mid-output lines that happen to match.
+# ACL2's proof builder: "->: ", nested "-->: " (the default pc-prompt)
+_PROOF_BUILDER_PROMPT = re.compile(r'-+>: $')
+# An ACL2 query (acl2-query): "ACL2 Query (:ID):  ...  (Y, N or Q):  "
+_QUERY_PROMPT = re.compile(r'.*\):  $')
+# ACL2's walkabout, which prints the current object, then ":" on a line
+_WALKABOUT_PROMPT = re.compile(r':$')
+
 PROMPT_PATTERNS = [
-    re.compile(r'.*>[ ]*$'),      # ACL2, GCL, CLISP, LispWorks, CCL debugger
+    re.compile(r'.*>[ ]*$'),      # ACL2 (also break-rewrite "1 ACL2 >"), GCL,
+                                  # CLISP, LispWorks, CCL debugger "1 > "
     re.compile(r'.*\] $'),        # SBCL debugger
     re.compile(r'.*\* $'),        # CMUCL, SBCL
+    re.compile(r'\? $'),          # CCL
+    _PROOF_BUILDER_PROMPT,
+    _QUERY_PROMPT,
+    _WALKABOUT_PROMPT,
 ]
-# Other Lisp prompts not included: ".*[?] $" (CCL), ".*): $" (Allegro CL)
+# Other Lisp prompts not included: ".*): $" (Allegro CL)
+
+# An ACL2 read-eval-print loop prompt (default-print-prompt): package,
+# "(r)" in ACL2(r), a space, mode (! s p, or P in raw mode), and a > per LD
+# level; after "N " in break-rewrite and "Wormhole " in a wormhole.  ACL2
+# package names have no lower case letters (defpkg disallows them), which
+# rules out the prompts of most other programs' read loops ("calc > ");
+# and the package must have a non-digit, which rules out the CCL
+# debugger's "1 > ".
+_ACL2_PROMPT = re.compile(
+    r'(?:Wormhole )?(?:\d+ )?(?=\S*[^\d\s])[^\sa-z]+(?:\(r\))? ([!psP]*)>+ *')
+
+
+def prompt_mode(text: str) -> str:
+    """How input is read at the prompt TEXT: "acl2" (by ACL2's reader),
+    "raw-acl2" (in ACL2's raw mode: ACL2's reader, but with no check of
+    the objects read), or "lisp" (by the host Lisp's reader, in raw Lisp
+    or a debugger)."""
+    if not text:
+        return "acl2"  # no prompt seen yet; ACL2 starts in its loop
+    m = _ACL2_PROMPT.fullmatch(text)
+    if m:
+        return "raw-acl2" if "P" in m.group(1) else "acl2"
+    if any(p.fullmatch(text) for p in (_PROOF_BUILDER_PROMPT, _QUERY_PROMPT,
+                                       _WALKABOUT_PROMPT)):
+        return "acl2"  # these read with read-object
+    return "lisp"
 
 
 def prompt_depth(text: str) -> int:
@@ -269,8 +315,13 @@ class ACL2Session:
     master_fd: Optional[int] = None
     slave_path: Optional[str] = None  # e.g. /dev/pts/3; see _flush_pty_input
     interrupt_count: int = 0  # Incremented by interrupt(); see _write_input
-    # Sends the rest of a command whose evaluate call timed out
-    _pending_write: Optional["asyncio.Task[None]"] = field(default=None, repr=False)
+    # Finishes a command whose evaluate call timed out (see _finish_command)
+    _pending_send: Optional["asyncio.Task[None]"] = field(default=None, repr=False)
+    # Output of a command that timed out, from this sequence ID on, which
+    # no reply has shown yet (see _take_unreported_output)
+    _unreported_from: Optional[int] = None
+    # The host Lisp's reader syntax (see start_session)
+    syntax: reader.Syntax = reader.SBCL
     reader_registered: bool = False  # Track whether loop.add_reader was called
     ring_buffer: bytearray = field(default_factory=bytearray)
     max_ring_buffer_size: int = 65536  # 64KB rolling buffer
@@ -297,6 +348,25 @@ class ACL2Session:
     # across concurrent _process_pty_chunk / _flush_prompt coroutines.
     _chunk_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
+    # Sending a command one form at a time (see _send_units).  A prompt
+    # candidate is output that ends with a prompt, before it settles;
+    # candidate_seq counts those at an allowed depth, each once (by where
+    # it starts in the output).  _sends counts the forms sent: a prompt
+    # seen before the latest send can't be the prompt after that form, so
+    # _flush_prompt doesn't confirm it.
+    candidate_seq: int = 0
+    _sends: int = 0
+    _candidate_offset: int = -1
+    _candidate_sends: int = -1
+    # The latest output that ended with a prompt, at any depth, as
+    # (start, end, sends, text); see _adopt_pending_prompt
+    _last_prompt_like: Optional[tuple[int, int, int, str]] = None
+    _total_bytes: int = 0  # bytes of output processed so far
+    # When output last arrived (time.monotonic()), and _sends then
+    _last_output_time: float = 0.0
+    _last_output_sends: int = 0
+    _unknown_prompt_adopted: bool = False  # see _adopt_pending_prompt
+
     # Background task references
     # Note: PTY reader uses loop.add_reader() callback (event-driven, tracked via reader_registered)
     logger_task: Optional[asyncio.Task[None]] = None
@@ -308,9 +378,17 @@ class ACL2Session:
     # SessionManager.log_viewer_opened), called once when the session ends
     close_viewer: Optional[Callable[[], None]] = field(default=None, repr=False)
 
-    async def send_command(self, command: str, timeout: int | None = None) -> str:
+    async def send_command(self, command: str, timeout: int | None = None,
+                           as_is: bool = False) -> str:
         """
         Send a command to the ACL2 session and get response.
+
+        The command is sent one top-level form at a time, each once ACL2
+        has finished the one before (see _plan_units and _send_units), and
+        the reply is ACL2's output up to its prompt after the last form.
+        Code that ACL2's reader would reject is not sent at all.  AS_IS:
+        send the command exactly as given, in one piece, without reading
+        it as ACL2 code (for a program that reads its own kind of input).
 
         Uses background logging infrastructure - does not read from stdout directly.
         Instead, waits for prompt to appear in the output_buffer populated by logger task.
@@ -336,24 +414,34 @@ class ACL2Session:
             validated_timeout = validate_timeout(timeout)
 
             # The timeout covers the whole command: waiting for an earlier
-            # command to be sent, sending this one, and evaluating it.
+            # command to finish, sending this one, and evaluating it.
             start_time = time.time()
             deadline = (None if validated_timeout is None
                         else start_time + validated_timeout)
+            log_hint = (f"  Session log: {self.log_file}"
+                        if self.log_file else "")
 
             try:
-                # Never write into the middle of an earlier command that is
-                # still being sent (see _finish_write).
-                pending = self._pending_write
+                # An earlier command whose evaluate call timed out may still
+                # be running (see _finish_command).  Wait for it, so that
+                # each reply shows its own command's output.
+                pending = self._pending_send
                 if pending is not None and not pending.done():
                     remaining = (None if deadline is None
                                  else max(0.0, deadline - time.time()))
                     try:
                         await asyncio.wait_for(asyncio.shield(pending), remaining)
                     except asyncio.TimeoutError:
-                        return ("Error: Command not sent: ACL2 is still busy and "
-                                "has not yet read all of the previous command.  "
-                                "Wait and try again, or call interrupt_session.")
+                        return ("Error: Command not sent: ACL2 is still busy "
+                                "with an earlier command that timed out.  "
+                                "Wait and try again, or call interrupt_session."
+                                + log_hint)
+                if self._unreported_from is not None:
+                    await asyncio.sleep(0.05)  # let the logger catch up
+                earlier = self._take_unreported_output()
+
+                data = f"{command}\n".encode()
+                plan = [len(data)] if as_is else self._plan_units(data)
 
                 # Capture the output sequence counter BEFORE adding anything
                 # to queues or writing to PTY.  During the await calls below,
@@ -376,36 +464,58 @@ class ACL2Session:
                 # Timestamp after input (preserve original format)
                 seq_id = await self._get_next_sequence_id()
                 current_time = time.strftime("%Y-%m-%d %H:%M:%S")
+                if isinstance(plan, str) or not plan:
+                    reason = plan or "only comments and whitespace"
+                    await self.merge_queue.put((
+                        timestamp_mono, seq_id, "stdin",
+                        f"[{current_time} NOT SENT: {reason}]\n"))
+                    if not plan:
+                        return (earlier + "Nothing to evaluate: the code has "
+                                "only comments and whitespace.")
+                    return (earlier + f"Error: Nothing was sent, because "
+                            f"ACL2 couldn't read the code: {plan}.  (If it "
+                            f"is input for a program that reads its own kind "
+                            f"of input, send it with as_is.)")
                 timestamp_line = f"[{current_time} INPUT]\n"
                 await self.merge_queue.put((timestamp_mono, seq_id, "stdin", timestamp_line))
+                cuts = plan
 
-                # Send command to ACL2 via PTY master.  ACL2 may not read it
-                # all at once (see _write_input).
-                data = memoryview(f"{command}\n".encode())
+                # Send the command to ACL2 via the PTY master, one form at a
+                # time (see _send_units)
                 interrupts = self.interrupt_count
-                written, outcome = await self._write_input(
-                    data, 0, deadline, interrupts)
+                unit, written, mark, outcome = await self._send_units(
+                    data, cuts, 0, 0, self.candidate_seq, deadline, interrupts)
+                sent = min((cuts[unit - 1] if unit else 0) + written, len(data))
                 if outcome == "closed":
                     return "Error: Session terminated during command execution"
                 if outcome == "timeout":
                     # As for any timeout, leave ACL2 working; send it the
-                    # rest of the command as it reads.
-                    self._pending_write = asyncio.create_task(
-                        self._finish_write(data, written, interrupts))
-                    self._adopt_pending_prompt()
-                    log_hint = (f"  Session log: {self.log_file}"
-                                if self.log_file else "")
-                    return (f"Error: Command execution timed out after "
-                            f"{validated_timeout} seconds.  ACL2 is still busy "
-                            f"and has not read all of the command yet "
-                            f"({written} of {len(data)} bytes sent); the rest "
-                            f"will be sent as it reads.  To stop it instead, "
-                            f"call interrupt_session.{log_hint}")
+                    # rest of the command as it finishes each form.
+                    if not written and await self._adopt_and_log_prompt():
+                        # ACL2 waits for input at a prompt that doesn't
+                        # count, such as the deeper one of
+                        # (ld *standard-oi*): go on from there
+                        self._confirm_max_depth = max(
+                            self._confirm_max_depth,
+                            prompt_depth(self.last_prompt_text))
+                        self.candidate_seq += 1
+                    self._pending_send = asyncio.create_task(
+                        self._finish_command(data, cuts, unit, written, mark,
+                                             interrupts, None))
+                    self._unreported_from = start_seq_id
+                    return (earlier + f"Error: Command execution timed out "
+                            f"after {validated_timeout} seconds.  ACL2 is "
+                            f"still busy, and not all of the command has been "
+                            f"sent yet ({sent} of {len(data)} bytes); the rest "
+                            f"will be sent as it finishes each form.  The next "
+                            f"evaluate waits for it to finish and shows its "
+                            f"output first; to stop it instead, call "
+                            f"interrupt_session.{log_hint}")
                 note = ""
                 if outcome == "interrupted":
-                    await self._log_input_cut_short(written, len(data))
+                    await self._log_input_cut_short(sent, len(data))
                     note = (f"Note: interrupted before the whole command was "
-                            f"sent ({written} of {len(data)} bytes); the rest "
+                            f"sent ({sent} of {len(data)} bytes); the rest "
                             f"was discarded.\n")
 
                 # Wait for a confirmed prompt from the chunk processor.
@@ -413,50 +523,38 @@ class ACL2Session:
                 # buffers and waits PROMPT_SETTLE_SECONDS before confirming,
                 # then increments prompt_seq and notifies via prompt_condition.
                 #
-                # We capture prompt_seq only now that the command has been
+                # We capture prompt_seq only now that the last form has been
                 # sent, so that earlier confirmations are ignored: stale ones
                 # from earlier commands (e.g., LD intermediate prompts still
-                # being flushed), and ones from this command's earlier forms
-                # while the write was waiting for ACL2 to read.
+                # being flushed).  A prompt seen before the last form was
+                # sent is never confirmed (see _flush_prompt).
                 start_prompt_seq = self.prompt_seq
                 _debug_log(f"send_command: start_seq_id={start_seq_id}, start_prompt_seq={start_prompt_seq}, output_buffer_len={len(self.output_buffer)}")
 
-                try:
-                    async with self.prompt_condition:
-                        while self.prompt_seq <= start_prompt_seq:
-                            # Compute wait timeout
-                            if validated_timeout is not None:
-                                elapsed = time.time() - start_time
-                                if elapsed >= validated_timeout:
-                                    # On timeout, check if there's an
-                                    # unconfirmed prompt in the partial
-                                    # buffer and adopt it as the current
-                                    # prompt.  This allows subsequent
-                                    # commands to use the correct depth
-                                    # (e.g., after (ld *standard-oi*)
-                                    # produces a depth-2 prompt).
-                                    self._adopt_pending_prompt()
-                                    return note + f"Error: Command execution timed out after {validated_timeout} seconds"
-                                remaining = max(0.1, validated_timeout - elapsed)
-                                wait_timeout = min(remaining, 1.0)
-                            else:
-                                wait_timeout = 1.0
-
-                            try:
-                                await asyncio.wait_for(
-                                    self.prompt_condition.wait(),
-                                    timeout=wait_timeout,
-                                )
-                            except asyncio.TimeoutError:
-                                pass
-
-                            # Check if session has been shutdown
-                            if self.shutdown_event.is_set():
-                                return "Error: Session terminated during command execution"
-
-                except Exception as e:
-                    _debug_log(f"send_command exception: {type(e).__name__}: {e}")
-                    return f"Error: Session communication failed ({type(e).__name__}: {e})"
+                outcome = await self._wait_for_prompt(start_prompt_seq, deadline,
+                                                      None)
+                if outcome == "closed":
+                    return "Error: Session terminated during command execution"
+                if outcome == "timeout":
+                    self._unreported_from = start_seq_id
+                    # If ACL2's output ends with a prompt that doesn't
+                    # count, such as the deeper one of (ld *standard-oi*),
+                    # ACL2 waits for input: take that as the current prompt
+                    # for later commands.  Otherwise ACL2 is still working.
+                    if await self._adopt_and_log_prompt():
+                        return (earlier + note + f"Error: Command execution "
+                                f"timed out after {validated_timeout} seconds.  "
+                                f"ACL2 seems to be waiting for input at "
+                                f"{self.last_prompt_text.strip()!r}; later "
+                                f"commands are sent there.{log_hint}")
+                    self._pending_send = asyncio.create_task(
+                        self._finish_command(data, cuts, len(cuts), 0, mark,
+                                             interrupts, start_prompt_seq))
+                    return (earlier + note + f"Error: Command execution timed "
+                            f"out after {validated_timeout} seconds.  ACL2 is "
+                            f"still working on it; the next evaluate waits for "
+                            f"it to finish and shows its output first.  To stop "
+                            f"it instead, call interrupt_session.{log_hint}")
 
                 _debug_log(f"send_command: prompt confirmed, prompt_seq={self.prompt_seq}, last_prompt='{self.last_prompt_text}'")
 
@@ -477,7 +575,9 @@ class ACL2Session:
 
                 # Return collected output, eliding if too large
                 output = "".join(output_lines).strip()
-                return note + elide_large_output(output, self.tool_output_config, self.log_file)
+                return (earlier + note
+                        + elide_large_output(output, self.tool_output_config,
+                                             self.log_file))
 
             except OSError as e:
                 if e.errno in (errno.EIO, errno.EBADF, errno.EPIPE):
@@ -486,6 +586,176 @@ class ACL2Session:
             except Exception:
                 # SECURITY: Don't leak internal details in error messages
                 return "Error: Failed to execute command in session"
+
+    def _plan_units(self, data: bytes) -> list[int] | str:
+        """Where to split DATA, a command ending with a newline, into units
+        sent one at a time: a list of the units' ends (offsets in DATA),
+        or why ACL2 couldn't read it.
+
+        A unit is a top-level form with the text before it, except that a
+        keyword command such as ":pe foo" takes the rest of its line:
+        ACL2 reads the command's arguments after it, as many as it takes
+        in ACL2's world.  The last unit takes the rest of DATA.  DATA is
+        one unit at a raw Lisp or debugger prompt, where the host Lisp
+        reads it with its own syntax, and when syntax the reader doesn't
+        handle (or a top-level feature conditional, whose form may be
+        skipped) leaves the forms uncertain.
+        """
+        whole = [len(data)]
+        mode = prompt_mode(self.last_prompt_text)
+        if mode == "lisp":
+            return whole
+        code = data[:-1]
+        try:
+            forms = reader.read_forms(code, self.syntax,
+                                      check_objects=(mode == "acl2"))
+        except reader.ReadError as e:
+            if e.kind == "unsupported":
+                return whole
+            if e.incomplete:
+                return f"it ends inside a form, string or comment: {e}"
+            return str(e)
+        if any(form.kind == "conditional" for form in forms):
+            return whole
+        cuts = []
+        k = 0
+        while k < len(forms):
+            end = forms[k].end
+            if forms[k].kind == "keyword":
+                while (k + 1 < len(forms)
+                       and b"\n" not in code[end:forms[k + 1].start]):
+                    k += 1
+                    end = forms[k].end
+            cuts.append(end)
+            k += 1
+        if cuts:
+            cuts[-1] = len(data)
+        return cuts
+
+    async def _send_units(self, data: bytes, cuts: list[int], unit: int,
+                          written: int, mark: int, deadline: Optional[float],
+                          interrupts: int) -> tuple[int, int, int, str]:
+        """Send the units of DATA that end at CUTS (see _plan_units), from
+        UNIT on (WRITTEN bytes of which were already sent), each once ACL2
+        has finished the one before.
+
+        ACL2 has finished a unit when a prompt appears after it was sent:
+        candidate_seq passes MARK, its value when the unit was sent.  A
+        unit other than the last gets a newline, to end its last token;
+        the last one ends with DATA's newline.
+
+        Returns the unit being sent (len(CUTS) when all were), the bytes of
+        it sent, MARK, and why sending stopped, as for _write_input.
+        """
+        while unit < len(cuts):
+            text = data[cuts[unit - 1] if unit else 0:cuts[unit]]
+            if unit < len(cuts) - 1:
+                text += b"\n"
+            if not written:
+                if unit:
+                    outcome = await self._wait_for_candidate(mark, deadline,
+                                                             interrupts)
+                    if outcome != "ready":
+                        return unit, 0, mark, outcome
+                # No prompt seen from now on can be an earlier unit's
+                self._sends += 1
+                mark = self.candidate_seq
+            written, outcome = await self._write_input(
+                memoryview(text), written, deadline, interrupts)
+            if outcome != "done":
+                return unit, written, mark, outcome
+            unit, written = unit + 1, 0
+        return unit, 0, mark, "done"
+
+    async def _wait_for_candidate(self, mark: int, deadline: Optional[float],
+                                  interrupts: int) -> str:
+        """Wait for a prompt candidate after MARK (see _send_units).
+        Returns "ready", "timeout", "interrupted" or "closed"."""
+        async with self.prompt_condition:
+            while self.candidate_seq <= mark:
+                if self.interrupt_count != interrupts:
+                    return "interrupted"
+                if self.shutdown_event.is_set() or self.master_fd is None:
+                    return "closed"
+                wait = 1.0
+                if deadline is not None:
+                    wait = min(wait, deadline - time.time())
+                    if wait <= 0:
+                        return "timeout"
+                try:
+                    await asyncio.wait_for(self.prompt_condition.wait(), wait)
+                except asyncio.TimeoutError:
+                    pass
+        return "ready"
+
+    async def _wait_for_prompt(self, mark: int, deadline: Optional[float],
+                               interrupts: Optional[int]) -> str:
+        """Wait for a prompt confirmed after MARK (a value of prompt_seq).
+
+        Returns "ready", "timeout", "closed", or "interrupted" (only if
+        INTERRUPTS is given and interrupt() was called since it was read).
+        """
+        async with self.prompt_condition:
+            while self.prompt_seq <= mark:
+                if interrupts is not None and self.interrupt_count != interrupts:
+                    return "interrupted"
+                if self.shutdown_event.is_set():
+                    return "closed"
+                wait = 1.0
+                if deadline is not None:
+                    wait = min(wait, deadline - time.time())
+                    if wait <= 0:
+                        return "timeout"
+                try:
+                    await asyncio.wait_for(self.prompt_condition.wait(), wait)
+                except asyncio.TimeoutError:
+                    pass
+        return "ready"
+
+    async def _finish_command(self, data: bytes, cuts: list[int], unit: int,
+                              written: int, mark: int, interrupts: int,
+                              prompt_mark: Optional[int]) -> None:
+        """Finish a command whose evaluate call timed out: send the rest of
+        it as ACL2 finishes each form (see _send_units), then wait for the
+        prompt after the last form (confirmed after PROMPT_MARK, if all of
+        it was already sent).
+
+        Runs as a task (_pending_send) after send_command has returned.
+        send_command waits for it before sending another command, and
+        interrupt() stops it.
+        """
+        try:
+            if unit < len(cuts):
+                unit, written, mark, outcome = await self._send_units(
+                    data, cuts, unit, written, mark, None, interrupts)
+                if outcome == "interrupted":
+                    await self._log_input_cut_short(
+                        min((cuts[unit - 1] if unit else 0) + written,
+                            len(data)),
+                        len(data))
+                if outcome != "done":
+                    return
+                prompt_mark = self.prompt_seq
+            assert prompt_mark is not None
+            await self._wait_for_prompt(prompt_mark, None, interrupts)
+        except OSError:
+            return
+
+    def _take_unreported_output(self) -> str:
+        """The output of a command whose evaluate call timed out, which no
+        reply has shown yet, to put before the next reply."""
+        start = self._unreported_from
+        if start is None:
+            return ""
+        self._unreported_from = None
+        output = "".join(line for sid, line in self.output_buffer
+                         if sid > start).strip()
+        if not output:
+            return ""
+        return ("Output of the earlier command that timed out:\n"
+                + elide_large_output(output, self.tool_output_config,
+                                     self.log_file)
+                + "\n\nOutput of this command:\n")
 
     async def _write_input(self, data: memoryview, written: int,
                            deadline: Optional[float],
@@ -521,21 +791,6 @@ class ACL2Session:
                 await asyncio.sleep(delay)
                 delay = min(2 * delay, 0.05)
         return written, "done"
-
-    async def _finish_write(self, data: memoryview, written: int,
-                            interrupts: int) -> None:
-        """Send the rest of a command whose evaluate call timed out.
-
-        Runs as a task (_pending_write) after send_command has returned.
-        send_command waits for it before sending another command.
-        """
-        try:
-            written, outcome = await self._write_input(
-                data, written, None, interrupts)
-        except OSError:
-            return
-        if outcome == "interrupted":
-            await self._log_input_cut_short(written, len(data))
 
     async def _log_input_cut_short(self, written: int, total: int) -> None:
         """Note in the session log that a command was not sent in full."""
@@ -588,9 +843,15 @@ class ACL2Session:
             if self.process.returncode is not None:
                 return "Error: Session process has already terminated"
 
-            # Stop any command still being written (see _write_input): its
-            # rest must not follow the interrupt.
+            # Stop any command still being written (see _write_input), and
+            # one finishing in the background (_finish_command): the rest
+            # must not follow the interrupt.  This reply shows ACL2's
+            # response, so an earlier timed-out command's output needn't
+            # come with the next one.
             self.interrupt_count += 1
+            self._unreported_from = None
+            async with self.prompt_condition:
+                self.prompt_condition.notify_all()
 
             # Output and prompts from here on are ACL2's response
             start_seq_id = self.sequence_counter
@@ -628,8 +889,9 @@ class ACL2Session:
             await self.merge_queue.put(
                 (timestamp, seq_id, "stdout", f"[{interrupt_time} {marker}]\n"))
 
-            at_prompt = await self._wait_for_prompt_after(
-                start_prompt_seq, INTERRUPT_WAIT_SECONDS)
+            at_prompt = await self._wait_for_prompt(
+                start_prompt_seq, time.time() + INTERRUPT_WAIT_SECONDS,
+                None) == "ready"
             # Let the logger task move the prompt into output_buffer
             await asyncio.sleep(0.05)
             output = "".join(line for sid, line in self.output_buffer
@@ -646,23 +908,6 @@ class ACL2Session:
 
         except Exception as e:
             return f"Error: Failed to interrupt session: {e}"
-
-    async def _wait_for_prompt_after(self, start_prompt_seq: int,
-                                     timeout: float) -> bool:
-        """Wait up to TIMEOUT seconds for a prompt confirmed after
-        START_PROMPT_SEQ (a value of prompt_seq).  Returns whether one was."""
-        deadline = time.monotonic() + timeout
-        async with self.prompt_condition:
-            while self.prompt_seq <= start_prompt_seq:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0 or self.shutdown_event.is_set():
-                    return False
-                try:
-                    await asyncio.wait_for(self.prompt_condition.wait(),
-                                           timeout=min(remaining, 1.0))
-                except asyncio.TimeoutError:
-                    pass
-        return True
 
     async def _get_next_sequence_id(self) -> int:
         """Get the next sequence ID for ordering output lines."""
@@ -762,6 +1007,9 @@ class ACL2Session:
             chunk: Raw bytes from PTY (may contain partial lines, carriage returns, etc.)
         """
         async with self._chunk_lock:
+            self._total_bytes += len(chunk)
+            self._last_output_time = time.monotonic()
+            self._last_output_sends = self._sends
             try:
                 # Cancel any pending prompt flush — new data arrived, so the
                 # partial buffer we were about to flush as a prompt was actually
@@ -808,6 +1056,7 @@ class ACL2Session:
                             decoded_buffer = buffer.decode(errors='replace')
                             prompt_candidate = decoded_buffer.rstrip('\r')
                             if matches_prompt_pattern(prompt_candidate):
+                                await self._note_prompt_candidate(prompt_candidate)
                                 self._schedule_prompt_flush()
                         except UnicodeDecodeError:
                             pass  # Partial UTF-8; wait for more bytes
@@ -816,6 +1065,22 @@ class ACL2Session:
 
             except Exception as e:
                 print(f"Error processing PTY chunk: {e}", file=sys.stderr)
+
+    async def _note_prompt_candidate(self, text: str) -> None:
+        """Note that the output (so far) ends with TEXT, which looks like
+        a prompt, in partial_line_buffer.  Counts it in candidate_seq if it
+        is at an allowed depth and wasn't counted already (see _send_units).
+        Called with _chunk_lock held."""
+        end = self._total_bytes
+        start = end - len(self.partial_line_buffer)
+        self._last_prompt_like = (start, end, self._sends, text)
+        if (prompt_depth(text) <= self._confirm_max_depth
+                and start != self._candidate_offset):
+            self._candidate_offset = start
+            self._candidate_sends = self._sends
+            self.candidate_seq += 1
+            async with self.prompt_condition:
+                self.prompt_condition.notify_all()
 
     def _schedule_prompt_flush(self) -> None:
         """Schedule a delayed flush of the partial_line_buffer as a prompt.
@@ -831,36 +1096,59 @@ class ACL2Session:
             lambda: asyncio.ensure_future(self._flush_prompt()),
         )
 
-    def _adopt_pending_prompt(self) -> None:
+    def _adopt_pending_prompt(self) -> bool:
         """Adopt an unconfirmed prompt as the current prompt level.
 
-        Called on timeout.  Checks both partial_line_buffer (prompt not
-        yet flushed) and the last line in output_buffer (prompt flushed
-        to log but not confirmed).  Updates last_prompt_text so that
-        subsequent commands use the correct depth for
-        _confirm_max_depth.  This handles the case where
-        (ld *standard-oi*) produces a depth-2 prompt that was never
-        confirmed.
-        """
-        # Check partial_line_buffer first
-        if self.partial_line_buffer:
-            try:
-                decoded = bytes(self.partial_line_buffer).decode(errors='replace')
-                candidate = decoded.rstrip('\r')
-                if matches_prompt_pattern(candidate):
-                    self.last_prompt_text = candidate
-                    _debug_log(f"_adopt_pending_prompt: adopted from partial_line_buffer '{candidate}'")
-                    return
-            except Exception:
-                pass
+        Called on timeout.  If ACL2's output ends with a prompt that
+        appeared after the latest form was sent but wasn't confirmed (such
+        as the depth-2 prompt of (ld *standard-oi*)), ACL2 is waiting for
+        input there: make it last_prompt_text, so that later commands use
+        its depth for _confirm_max_depth.
 
-        # Check the last line in output_buffer (prompt was flushed but not confirmed)
-        if self.output_buffer:
-            _seq_id, last_line = self.output_buffer[-1]
-            candidate = last_line.rstrip('\n').rstrip('\r')
-            if matches_prompt_pattern(candidate):
-                self.last_prompt_text = candidate
-                _debug_log(f"_adopt_pending_prompt: adopted from output_buffer '{candidate}'")
+        Likewise if the output ends with an unfinished line, printed after
+        the latest form was sent, and nothing more has come for
+        UNKNOWN_PROMPT_SECONDS: almost surely a prompt of some read loop
+        that PROMPT_PATTERNS doesn't know.  Taking it as the prompt lets
+        the next command be sent (whole, since prompt_mode doesn't know
+        how it reads), where waiting for the earlier command to finish
+        would block the session.  Returns whether it adopted a prompt.
+        """
+        if self._last_prompt_like is not None:
+            _start, end, sends, text = self._last_prompt_like
+            if end == self._total_bytes and sends == self._sends:
+                self.last_prompt_text = text
+                _debug_log(f"_adopt_pending_prompt: adopted '{text}'")
+                return True
+        if (self.partial_line_buffer and self._last_output_sends == self._sends
+                and time.monotonic() - self._last_output_time
+                >= UNKNOWN_PROMPT_SECONDS):
+            text = bytes(self.partial_line_buffer).decode(errors="replace")
+            self.last_prompt_text = text.rstrip("\r")
+            _debug_log(f"_adopt_pending_prompt: adopted unknown prompt '{text}'")
+            # The caller logs it now (_flush_partial_line), as the timed-out
+            # command's output; a known prompt is logged when it settles
+            self._unknown_prompt_adopted = True
+            return True
+        return False
+
+    async def _adopt_and_log_prompt(self) -> bool:
+        """_adopt_pending_prompt, and log an adopted unknown prompt at once,
+        as the output of the command that timed out."""
+        self._unknown_prompt_adopted = False
+        adopted = self._adopt_pending_prompt()
+        if self._unknown_prompt_adopted:
+            await self._flush_partial_line()
+        return adopted
+
+    async def _flush_partial_line(self) -> None:
+        """Move the unfinished line of output to the log and output_buffer."""
+        async with self._chunk_lock:
+            if not self.partial_line_buffer:
+                return
+            text = bytes(self.partial_line_buffer).decode(errors="replace")
+            self.partial_line_buffer.clear()
+            seq_id = await self._get_next_sequence_id()
+            await self.merge_queue.put((time.monotonic(), seq_id, "stdout", text))
 
     async def _flush_prompt(self) -> None:
         """Flush the partial_line_buffer as a confirmed prompt.
@@ -888,9 +1176,14 @@ class ACL2Session:
                     return
 
                 depth = prompt_depth(prompt_candidate)
-                if depth > self._confirm_max_depth:
+                start = self._total_bytes - len(self.partial_line_buffer)
+                stale = (start != self._candidate_offset
+                         or self._candidate_sends != self._sends)
+                if depth > self._confirm_max_depth or stale:
                     # Deeper than the starting depth — likely an
-                    # intermediate prompt during LD.  Don't confirm
+                    # intermediate prompt during LD — or seen before the
+                    # latest form was sent, so not the prompt after it
+                    # (see _send_units).  Don't confirm
                     # (don't increment prompt_seq or notify), but DO
                     # flush to the log/output_buffer so the prompt
                     # appears in the correct position in the log.
@@ -1020,9 +1313,9 @@ class ACL2Session:
             # Stop sending the rest of a timed-out command, so that
             # (good-bye) doesn't land in the middle of it and nothing is
             # written after the master fd is closed.
-            if self._pending_write is not None:
-                self._pending_write.cancel()
-                await asyncio.gather(self._pending_write, return_exceptions=True)
+            if self._pending_send is not None:
+                self._pending_send.cancel()
+                await asyncio.gather(self._pending_send, return_exceptions=True)
 
             # Ask ACL2 to exit.  The write fails if the input queue is full
             # (ACL2 is busy and hasn't read the last command), in which case
@@ -1129,6 +1422,80 @@ def _emacsclient_eval(form: str) -> None:
         pass
 
 
+def _terminal_tail_command(log_file: Path, lines: int) -> str:
+    """The command a Terminal log window runs: tail -f LOG_FILE in a sh
+    wrapper that, on SIGTERM (or Ctrl-C, or the window closing), stops
+    tail and exits 0.  close_log_viewer signals the wrapper, and closes
+    the window once nothing runs on its tty (see _stop_terminal_tail)."""
+    wrapper = (f"trap 'kill $! 2>/dev/null; exit 0' TERM INT HUP; "
+               f'tail -n {lines} -f "$0" & wait')
+    return f"exec /bin/sh -c {shlex.quote(wrapper)} {shlex.quote(str(log_file))}"
+
+
+def _terminal_wrapper_pattern(log_file: Path) -> str:
+    """A pkill -f pattern for the wrapper that _terminal_tail_command runs.
+    Anchored at the start of the command line, so that it can't match the
+    osascript processes, whose arguments mention the log too."""
+    return f"^/bin/sh -c trap .*tail -n .*{log_file.name}"
+
+
+def _terminal_tail_script(log_file: Path, lines: int, window_title: str) -> str:
+    """AppleScript (inside tell application "Terminal") that opens a window
+    running _terminal_tail_command and titles its tab WINDOW_TITLE: the tab
+    that do script returns, not the front window, which may be another."""
+    command = _terminal_tail_command(log_file, lines)
+    quoted = '"' + command.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return (
+        f"    set t to do script {quoted}\n"
+        f'    set custom title of t to "{window_title}"\n'
+        "    activate\n"
+    )
+
+
+# The Terminal log window AppleScripts waiting to run, as (window title,
+# script); see _osascript.  The worker thread that runs them shares the
+# state below with _stop_terminal_tail, under _viewer_lock.
+_osascript_queue: "queue.Queue[tuple[str, str]]" = queue.Queue()
+_osascript_worker: Optional[threading.Thread] = None
+_viewer_lock = threading.Condition()
+_osascript_running: Optional[str] = None  # the title of the running script
+_windows_opened: dict[str, int] = {}  # by title: windows the scripts may have opened
+_windows_closing: set[str] = set()  # the titles whose windows are closed
+
+
+def _osascript(window_title: str, script: str) -> None:
+    """Run SCRIPT, which opens or shows the log window titled WINDOW_TITLE
+    (and returns "shown" if it only shows one), in the background, once the
+    scripts queued before it have finished.  (show_session_log called
+    right after start_session must find the window that start_session's
+    script opens.)  It is dropped if, by then, that window is being closed:
+    otherwise a window would be opened for a session that has ended."""
+    global _osascript_worker
+    _osascript_queue.put((window_title, script))
+    if _osascript_worker is None:
+        _osascript_worker = threading.Thread(target=_run_osascripts, daemon=True)
+        _osascript_worker.start()
+
+
+def _run_osascripts() -> None:
+    """Run the queued viewer AppleScripts, one at a time.  Runs in a thread."""
+    global _osascript_running
+    while True:
+        window_title, script = _osascript_queue.get()
+        with _viewer_lock:
+            if window_title in _windows_closing:
+                continue
+            _osascript_running = window_title
+        # Count a window unless the script only showed one: a script that
+        # failed or timed out (Terminal not answering) may have opened one
+        shown = _run(["osascript", "-e", script]).strip() == "shown"
+        with _viewer_lock:
+            if not shown:
+                _windows_opened[window_title] = _windows_opened.get(window_title, 0) + 1
+            _osascript_running = None
+            _viewer_lock.notify_all()
+
+
 def open_log_viewer(
     log_file: Path, lines: int = 50, session_id: str = "", viewer: str = "auto"
 ) -> None:
@@ -1156,16 +1523,10 @@ def open_log_viewer(
 
     try:
         if system == "Darwin":  # macOS
-            quoted_log_file = shlex.quote(str(log_file))
             window_title = _session_window_title(session_id)
-            script = (
-                'tell application "Terminal"\n'
-                f'    do script "tail -n {lines} -f {quoted_log_file}"\n'
-                f'    set custom title of front window to "{window_title}"\n'
-                "    activate\n"
-                "end tell\n"
-            )
-            subprocess.Popen(["osascript", "-e", script])
+            _osascript(window_title, 'tell application "Terminal"\n'
+                       + _terminal_tail_script(log_file, lines, window_title)
+                       + "end tell\n")
 
         elif system == "Linux":
             # Try different terminal emulators
@@ -1218,28 +1579,27 @@ def show_session_log(
 
     try:
         if system == "Darwin":  # macOS
-            quoted_log_file = shlex.quote(str(log_file))
             window_title = _session_window_title(session_id)
+            # Bring this session's window to the front if there is one
+            # still running something (its shell may not have started
+            # tail yet); otherwise open one
             script = (
                 'tell application "Terminal"\n'
-                '    set foundWindow to false\n'
                 '    repeat with w in windows\n'
-                '        try\n'
-                f'            if custom title of w is "{window_title}" then\n'
-                '                set frontmost of w to true\n'
-                '                set foundWindow to true\n'
-                '                exit repeat\n'
-                '            end if\n'
-                '        end try\n'
+                '        repeat with t in tabs of w\n'
+                '            try\n'
+                f'                if custom title of t is "{window_title}" and (count of processes of t) > 0 then\n'
+                '                    set frontmost of w to true\n'
+                '                    activate\n'
+                '                    return "shown"\n'
+                '                end if\n'
+                '            end try\n'
+                '        end repeat\n'
                 '    end repeat\n'
-                '    if foundWindow is false then\n'
-                f'        do script "tail -n {lines} -f {quoted_log_file}"\n'
-                f'        set custom title of front window to "{window_title}"\n'
-                '    end if\n'
-                '    activate\n'
-                'end tell\n'
+                + _terminal_tail_script(log_file, lines, window_title)
+                + 'end tell\n'
             )
-            subprocess.Popen(["osascript", "-e", script])
+            _osascript(window_title, script)
 
         elif system == "Linux":
             # On Linux, just open a new viewer (no easy way to find existing windows)
@@ -1258,9 +1618,9 @@ def close_log_viewer(
     """Close the viewer for a session's log.
 
     For the "emacs" backend, kills the tail buffer/process and removes its
-    window via acl2-mcp-close-log.  For the terminal backend, kills the tail
-    process following the log file (so Terminal won't show a "terminate
-    running processes?" dialog), then closes the window by its custom title.
+    window via acl2-mcp-close-log.  For the macOS Terminal backend, stops
+    the window's tail wrapper and closes the window (see
+    _stop_terminal_tail).
     Silently does nothing if the window or process doesn't exist.
     """
     if viewer == "none":
@@ -1274,49 +1634,133 @@ def close_log_viewer(
 
     try:
         if system == "Darwin":
-            # To close the Terminal window without a "terminate running
-            # processes?" dialog, we need to exit the shell cleanly.
-            # The window runs "tail -f <logfile>" as a foreground
-            # process.  We kill tail via pkill, wait for the shell to
-            # return to a prompt, send "exit" to exit the shell, then
-            # close the window.
-            window_title = _session_window_title(session_id)
-            if log_file:
-                try:
-                    subprocess.run(
-                        ["pkill", "-f", f"tail.*{log_file.name}"],
-                        capture_output=True, timeout=2,
-                    )
-                except Exception:
-                    pass
-
-            script = (
-                'delay 0.3\n'
-                'tell application "Terminal"\n'
-                '    repeat with w in windows\n'
-                '        try\n'
-                f'            if custom title of w is "{window_title}" then\n'
-                '                do script "exec true" in w\n'
-                '                exit repeat\n'
-                '            end if\n'
-                '        end try\n'
-                '    end repeat\n'
-                'end tell\n'
-                'delay 0.5\n'
-                'tell application "Terminal"\n'
-                '    repeat with w in windows\n'
-                '        try\n'
-                f'            if custom title of w is "{window_title}" then\n'
-                '                close w\n'
-                '                exit repeat\n'
-                '            end if\n'
-                '        end try\n'
-                '    end repeat\n'
-                'end tell\n'
-            )
-            subprocess.Popen(["osascript", "-e", script])
+            if log_file is None:
+                return
+            # In a thread: the window's shell may not have started the
+            # wrapper yet, and the caller is the event loop
+            thread = threading.Thread(
+                target=_stop_terminal_tail,
+                args=(_terminal_wrapper_pattern(log_file),
+                      _session_window_title(session_id)),
+                daemon=True)
+            _viewer_closers.add(thread)
+            thread.start()
     except Exception:
         pass
+
+
+# Threads closing Terminal log windows (see wait_for_viewer_closers)
+_viewer_closers: set[threading.Thread] = set()
+
+
+def _stop_terminal_tail(pattern: str, window_title: str) -> None:
+    """Stop the Terminal log windows' tail wrappers matching PATTERN (see
+    _terminal_tail_command), and close their windows.  Runs in a thread.
+
+    Terminal asks "terminate running processes?" when asked to close a
+    window that still runs a process, and what it reports for a tab (its
+    tty, its processes) can be stale.  So each wrapper's tty comes from
+    ps; the window is found by its title and that tty while the wrapper
+    still runs; and it is closed (by id) only once ps shows nothing at all
+    running on that tty and Terminal has noticed: the last line of the
+    window's history is "[Process completed]".  (Closed as soon as ps
+    showed the tty idle, a window could still bring up the dialog.)  When
+    in doubt, the window is left open.
+
+    The scripts that open windows for WINDOW_TITLE and haven't run yet are
+    dropped, and one that is running is waited for, so the number of
+    windows is known.  A window's shell can take a while to start the
+    wrapper, so this looks for the wrappers for up to 15 seconds.
+    """
+    try:
+        with _viewer_lock:
+            _windows_closing.add(window_title)
+            _viewer_lock.wait_for(lambda: _osascript_running != window_title, 15.0)
+            windows = _windows_opened.pop(window_title, 0)
+        deadline = time.time() + 15.0
+        stopped: set[int] = set()
+        while True:
+            pids = [int(pid) for pid in _run(["pgrep", "-f", pattern]).split()]
+            pids = [pid for pid in pids if pid not in stopped]
+            for pid in pids:
+                stopped.add(pid)
+                _stop_terminal_wrapper(pid, window_title)
+            if not pids:
+                if len(stopped) >= windows or time.time() >= deadline:
+                    break
+                time.sleep(0.25)
+    finally:
+        _viewer_closers.discard(threading.current_thread())
+
+
+def _stop_terminal_wrapper(pid: int, window_title: str) -> None:
+    """Stop the Terminal log window wrapper PID, and close its window titled
+    WINDOW_TITLE (see _stop_terminal_tail)."""
+    tty = _run(["ps", "-o", "tty=", "-p", str(pid)]).strip()
+    window = ""
+    if re.fullmatch(r"ttys\d+", tty):
+        window = _run(["osascript", "-e", (
+            'tell application "Terminal"\n'
+            '    repeat with w in windows\n'
+            '        try\n'
+            '            if (count of tabs of w) is 1 then\n'
+            f'                if tty of tab 1 of w is "/dev/{tty}" and custom title of tab 1 of w is "{window_title}" then return id of w\n'
+            '            end if\n'
+            '        end try\n'
+            '    end repeat\n'
+            '    return ""\n'
+            'end tell\n')]).strip()
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    if not window.isdigit():
+        _debug_log(f"close_log_viewer: no window found for {window_title}, tty {tty!r}")
+        return
+    deadline = time.time() + 10.0  # login can take seconds to exit
+    lines: list[str] = []
+    while time.time() < deadline:
+        time.sleep(0.2)
+        if _run(["ps", "-t", tty, "-o", "pid="]).strip():
+            continue
+        # The end of the history, not the contents: a window in the
+        # background doesn't update its contents
+        history = _run(["osascript", "-e", (
+            'tell application "Terminal"\n'
+            f'    set h to history of tab 1 of window id {window}\n'
+            'end tell\n'
+            'if length of h > 400 then set h to text -400 thru -1 of h\n'
+            'return h\n')])
+        lines = [line for line in history.splitlines() if line.strip()]
+        if lines and lines[-1].strip() == "[Process completed]":
+            _run(["osascript", "-e", (
+                'tell application "Terminal"\n'
+                f'    try\n        close window id {window}\n    end try\n'
+                'end tell\n')])
+            return
+    _debug_log(f"close_log_viewer: left {window_title} open (window {window}), "
+               f"last line {lines[-1] if lines else ''!r}")
+
+
+def _run(command: list[str]) -> str:
+    """Run COMMAND and return its output ("" if it fails)."""
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=10)
+    except Exception as e:
+        _debug_log(f"_run {command[0]}: {e}")
+        return ""
+    # (Not ps's errors: ps -t fails once a window's tty is gone, as it should)
+    if result.returncode != 0 and command[0] == "osascript":
+        _debug_log(f"_run osascript: {result.stderr.strip()}")
+    return result.stdout
+
+
+def wait_for_viewer_closers(timeout: float) -> None:
+    """Wait up to TIMEOUT seconds for log windows being closed (before the
+    server exits)."""
+    deadline = time.time() + timeout
+    for thread in list(_viewer_closers):
+        thread.join(max(0.0, deadline - time.time()))
 
 
 class SessionManager:
@@ -1477,19 +1921,18 @@ class SessionManager:
                 seq_id = await session._get_next_sequence_id()
                 await session.merge_queue.put((timestamp_mono, seq_id, "session", start_marker))
 
-            # Wait for ACL2 startup by checking for prompt in output_buffer
-            # (populated by background tasks)
+            # Wait for ACL2's first confirmed prompt: one that settles (see
+            # _flush_prompt).  ACL2 loads an acl2-customization file after
+            # printing a first prompt, in a nested LD, so a command sent at
+            # that prompt would take the prompt after the file for its own.
             start_time = time.time()
-            startup_complete = False
-            while time.time() - start_time < 10.0:  # 10 second timeout
-                # Check if we've seen the ACL2 prompt
-                for _sid, line in session.output_buffer:
-                    if "ACL2 !>" in line:
-                        startup_complete = True
-                        break
-                if startup_complete:
-                    break
-                await asyncio.sleep(0.1)  # Check every 100ms
+            while (session.prompt_seq == 0 and time.time() - start_time < 30.0
+                   and not session.shutdown_event.is_set()):
+                await asyncio.sleep(0.1)
+
+            # The host Lisp decides some of the reader's syntax
+            if b"Welcome to Clozure Common Lisp" in session.ring_buffer:
+                session.syntax = reader.CCL
 
             # Open log viewer if requested
             if effective_view_log_in_terminal and log_file:
@@ -1738,7 +2181,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="evaluate",
-            description="Send code to an ACL2 session as if typed at its prompt: events (defun, defthm, include-book, deflabel), expressions, and keyword commands (:pe, :pbt, :u, :ubu). Several forms per call are fine. Returns ACL2's output up to its next prompt; look in it for 'ACL2 Error' or 'FAILED' (a failed event changes nothing). Long output is shortened; the session log has all of it.",
+            description="Send code to an ACL2 session as if typed at its prompt: events (defun, defthm, include-book, deflabel), expressions, and keyword commands (:pe, :pbt, :u, :ubu). Several forms per call are fine: each is sent once ACL2 has finished the one before, and the reply is ACL2's output up to its prompt after the last; look in it for 'ACL2 Error' or 'FAILED' (a failed event changes nothing). Code that ACL2 can't read, such as a form missing its ), is rejected and none of it is sent. Long output is shortened; the session log has all of it.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1748,11 +2191,15 @@ async def list_tools() -> list[Tool]:
                     },
                     "timeout": {
                         "type": "number",
-                        "description": "Seconds to wait for the whole command (no limit if not given). On a timeout ACL2 is not interrupted: it keeps working (a command not yet fully sent is still sent), and its later output appears in the session log and at the start of the next reply. Check the log, then wait or call interrupt_session; don't end the session.",
+                        "description": "Seconds to wait for the whole command (no limit if not given). On a timeout ACL2 is not interrupted: it keeps working (the rest of a command not yet fully sent is still sent), and the next evaluate waits for it to finish and shows its output first. Check the session log, then wait or call interrupt_session; don't end the session.",
                     },
                     "session_id": {
                         "type": "string",
                         "description": "ID of the session to use",
+                    },
+                    "as_is": {
+                        "type": "boolean",
+                        "description": "Send the code exactly as given, in one piece, without reading it as ACL2 code: for a program that reads its own kind of input (default false).",
                     },
                 },
                 "required": ["code", "session_id"],
@@ -2213,6 +2660,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
         code = arguments["code"]
         timeout = arguments.get("timeout")
         session_id = arguments["session_id"]
+        as_is = arguments.get("as_is", False) is True
 
         session = session_manager.get_session(session_id)
         if not session:
@@ -2222,7 +2670,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
                     text=f"Error: Session {session_id} not found",
                 )
             ]
-        output = await session.send_command(code, timeout)
+        output = await session.send_command(code, timeout, as_is)
 
         return [
             TextContent(
@@ -2372,6 +2820,9 @@ async def run() -> None:
     async def clean_up() -> None:
         await asyncio.gather(session_manager.cleanup_all(),
                              stop_all_certifications())
+        # Let log windows finish closing
+        await asyncio.get_running_loop().run_in_executor(
+            None, wait_for_viewer_closers, 10.0)
 
     async def clean_up_and_exit() -> None:
         await clean_up()

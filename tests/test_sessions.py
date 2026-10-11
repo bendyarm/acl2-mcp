@@ -20,6 +20,7 @@ before the window's shell has started tail.
 
 import asyncio
 import os
+import re
 import time
 from typing import Any
 
@@ -29,6 +30,8 @@ from acl2_mcp import server
 from acl2_mcp.config import ServerConfig, SessionLogConfig
 from acl2_mcp.server import (
     call_tool,
+    matches_prompt_pattern,
+    prompt_mode,
     session_manager,
     validate_session_name,
     validate_integer_parameter,
@@ -413,14 +416,15 @@ async def test_interrupt_stops_sending_rest_of_command(
 
 @pytest.mark.asyncio
 async def test_interrupt_while_rest_of_command_unread(session_id: str) -> None:
-    """Interrupt works at once while ACL2 is busy with an early form and
-    the rest of the command is queued, unread.
+    """Interrupt works at once while ACL2 is busy with an early form of a
+    long command.
 
-    The command fits in the PTY input queue, so it is sent in full, but
-    ACL2 reads only part of it before starting the first form.  On Linux
-    the terminal acts on a byte only once the input ahead of it is read,
-    so a Ctrl-C written behind the rest of the command used to wait until
-    ACL2 had finished the form and read the rest.
+    When a command was sent all at once, it could be queued, unread,
+    behind the form ACL2 was busy with.  On Linux the terminal acts on a
+    byte only once the input ahead of it is read, so a Ctrl-C written
+    behind the rest of the command used to wait until ACL2 had finished
+    the form and read the rest.  (A command is now sent one form at a
+    time, except at a raw Lisp prompt.)
     """
     # Let ACL2 finish starting up (an acl2-customization file loads after
     # the first prompt, which start_session takes as the end of startup)
@@ -475,7 +479,9 @@ async def process_group_exits(pgid: int, timeout: float = 5.0) -> bool:
     while time.monotonic() < deadline:
         try:
             os.killpg(pgid, 0)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
+            # PermissionError: none of the group's processes are ours, so
+            # its ID was reused (by a root-owned login, say)
             return True
         await asyncio.sleep(0.1)
     return False
@@ -712,3 +718,241 @@ async def test_eof_detection() -> None:
 
     # Cleanup
     await call_tool("end_session", {"session_id": session_id})
+
+
+async def evaluate(session_id: str, code: str, timeout: int = 30) -> str:
+    result = await call_tool("evaluate", {
+        "session_id": session_id, "code": code, "timeout": timeout})
+    return result[0].text
+
+
+@pytest.mark.asyncio
+async def test_first_reply_has_no_startup_prompt(session_id: str) -> None:
+    """start_session returns once ACL2 is ready, after any
+    acl2-customization file, so the first reply is the command's own.
+
+    It used to return at ACL2's first prompt, before the customization
+    file was loaded; the first reply then started with the prompt after
+    the file."""
+    text = await evaluate(session_id, "(+ 1 2)")
+    assert re.search(r"INPUT\]\s*3\s*\n", text), text
+
+
+@pytest.mark.asyncio
+async def test_reply_waits_for_every_form(session_id: str) -> None:
+    """The reply to a command comes after its last form, even when a
+    later form takes a while and prints nothing.
+
+    The reply used to end at the first prompt that stayed quiet for 0.2
+    seconds, so a later form that was slow and silent (a sleep, or a
+    defthm proved without checkpoints) had its result in the next reply.
+    """
+    text = await evaluate(session_id, "(+ 1 2)\n(prog2$ (sleep 2) :second)")
+    assert re.search(r"(^|>)3$", text, re.M) and ":SECOND" in text
+    text = await evaluate(session_id, "(+ 1000 337)")
+    assert "1337" in text and ":SECOND" not in text
+
+
+@pytest.mark.asyncio
+async def test_keyword_command_takes_rest_of_line(session_id: str) -> None:
+    """A keyword command and its arguments on the same line are sent
+    together, since ACL2 reads the arguments after the keyword."""
+    text = await evaluate(session_id,
+                          "(defun kw-test (x) x)\n:pe kw-test\n(+ 2 3)")
+    # (A result that follows a prompt is on the prompt's line)
+    assert "(DEFUN KW-TEST (X) X)" in text and re.search(r"(^|>)5$", text, re.M)
+
+
+@pytest.mark.asyncio
+async def test_command_after_a_timeout_waits_for_it(session_id: str) -> None:
+    """After a command times out, the next one waits for it to finish, and
+    its reply shows the earlier command's output first.
+
+    The next command used to be sent at once, and its reply ended at the
+    earlier command's prompt: each reply showed the previous command's
+    result."""
+    text = await evaluate(session_id, "(prog2$ (sleep 3) :first-done)", 1)
+    assert "timed out" in text and "next evaluate waits" in text
+    text = await evaluate(session_id, "(prog2$ (sleep 1) :second-done)")
+    assert (text.index(":FIRST-DONE") < text.index("Output of this command")
+            < text.index(":SECOND-DONE"))
+    text = await evaluate(session_id, "(+ 2000 337)")
+    assert "2337" in text and ":SECOND-DONE" not in text
+    assert "earlier command" not in text
+
+
+@pytest.mark.asyncio
+async def test_unreadable_code_is_not_sent(session_id: str) -> None:
+    """Code that ACL2 can't read is rejected, and none of it is sent:
+    a form missing its ) would leave ACL2 waiting for the rest, which
+    then swallowed the next command."""
+    text = await evaluate(
+        session_id, "(defun not-sent (x) x)\n(defthm not-sent-thm (equal (not-sent x) x)")
+    assert "Nothing was sent" in text and "line 2" in text
+    text = await evaluate(session_id, "(not-sent 3)")
+    assert "ACL2 Error" in text  # the defun wasn't sent either
+    text = await evaluate(session_id, "; only a comment")
+    assert "Nothing to evaluate" in text
+
+
+@pytest.mark.asyncio
+async def test_raw_lisp_code_is_sent_whole(session_id: str) -> None:
+    """At a raw Lisp prompt the host Lisp reads the code, with its own
+    syntax, so the code is sent as it is: a float, which ACL2 rejects,
+    is fine there."""
+    await evaluate(session_id, ":q")
+    text = await evaluate(session_id, "(+ 1 2)\n(* 2 1.5)")
+    assert "3.0" in text
+    text = await evaluate(session_id, "(lp)")
+    text = await evaluate(session_id, "(+ 1000 337)")
+    assert "1337" in text
+
+
+@pytest.mark.asyncio
+async def test_proof_builder_prompt(session_id: str) -> None:
+    """The proof builder's prompt ("->: ") ends a reply, and so does the
+    query it asks when exiting with an event name ("... (Y, R, N or A):  ")."""
+    start = time.monotonic()
+    text = await evaluate(session_id, "(verify (equal (car (cons a b)) a))")
+    assert text.rstrip().endswith("->:") and time.monotonic() - start < 10
+    text = await evaluate(session_id, "prove")
+    assert text.rstrip().endswith("->:")
+    start = time.monotonic()
+    text = await evaluate(session_id, "(exit pb-car-cons)")
+    assert text.rstrip().endswith("(Y, R, N or A):") and time.monotonic() - start < 10
+    text = await evaluate(session_id, "y")
+    assert text.rstrip().endswith("ACL2 !>")
+    text = await evaluate(session_id, ":pe pb-car-cons")
+    assert "PB-CAR-CONS" in text
+
+
+@pytest.mark.parametrize("prompt, mode", [
+    ("ACL2 !>", "acl2"), ("ACL2 p!>", "acl2"), ("ACL2 >", "acl2"),
+    ("ACL2 !>>", "acl2"), ("1 ACL2 >", "acl2"), ("Wormhole ACL2 !>", "acl2"),
+    ("ACL2 P>", "raw-acl2"), ("->: ", "acl2"), (":", "acl2"),
+    ("ACL2(r) !>", "acl2"), ("X86ISA p!>", "acl2"),
+    # Other programs' prompts: lower case, which ACL2 packages don't have
+    ("calc >", "lisp"), ("foo !>", "lisp"), ("remora> ", "lisp"),
+    ("ACL2 Query (:EXIT):  Exit?  (Y, N or Q):  ", "acl2"),
+    ("* ", "lisp"), ("? ", "lisp"), ("0] ", "lisp"), ("0[2] ", "lisp"),
+    ("1 > ", "lisp"), ("2 > ", "lisp"), ("> ", "lisp"), ("Inspect> ", "lisp"),
+    ("Inspect 1> ", "lisp"),
+])
+def test_prompts(prompt: str, mode: str) -> None:
+    """Each prompt is recognized, and read with ACL2's reader or the host
+    Lisp's."""
+    assert matches_prompt_pattern(prompt)
+    assert prompt_mode(prompt) == mode
+
+
+@pytest.mark.asyncio
+async def test_debugger_and_inspector_prompts(session_id: str) -> None:
+    """Raw Lisp, the debugger, a nested debugger, and the inspector each end
+    a reply with their own prompt, which differ between host Lisps (CCL's
+    inspector prompt shows how deep in the object it is)."""
+    session = session_manager.get_session(session_id)
+    assert session is not None
+    if session.syntax.name == "ccl":
+        steps = [(":q", "?"), ("(car 3)", "1 >"), ("(car 4)", "2 >"),
+                 (":pop", "1 >"), (":pop", "?"),
+                 ("(inspect *package*)", "Inspect>"), ("1", "Inspect 1>"),
+                 ("1", "Inspect 2>"), (":q", "?")]
+    else:
+        steps = [(":q", "*"), ("(car 3)", "0]"), ("(car 4)", "0[2]"),
+                 ("0", "0]"), ("0", "*"),
+                 ("(inspect *package*)", ">"), ("1", ">"), ("1", ">"),
+                 ("q", "*")]
+    for code, prompt in steps + [("(lp)", "ACL2 !>")]:
+        start = time.monotonic()
+        text = await evaluate(session_id, code, 10)
+        assert time.monotonic() - start < 5, code
+        assert text.strip().splitlines()[-1].strip() == prompt, (code, text)
+    assert "1337" in await evaluate(session_id, "(+ 1000 337)")
+
+
+async def last_line_after(session_id: str, code: str) -> str:
+    """Evaluate CODE, which must reply within 5 seconds; return the reply's
+    last line."""
+    start = time.monotonic()
+    text = await evaluate(session_id, code, 10)
+    assert time.monotonic() - start < 5, (code, text)
+    return text.strip().splitlines()[-1].strip()
+
+
+@pytest.mark.asyncio
+async def test_walkabout_prompt(session_id: str) -> None:
+    """walkabout's prompt (":" on a line) ends a reply."""
+    assert await last_line_after(session_id, "(walkabout '(a (b c) d) state)") == ":"
+    assert await last_line_after(session_id, "1") == ":"
+    assert await last_line_after(session_id, "up") == ":"
+    assert await last_line_after(session_id, "q") == "ACL2 !>"
+
+
+@pytest.mark.asyncio
+async def test_wormhole_prompt(session_id: str) -> None:
+    """An interactive wormhole's prompt ("Wormhole ACL2 !>") ends a reply."""
+    code = "(wormhole 'demo '(lambda (whs) whs) nil '(quote (welcome!)))"
+    assert await last_line_after(session_id, code) == "Wormhole ACL2 !>"
+    assert await last_line_after(session_id, "(+ 1 2)") == "Wormhole ACL2 !>"
+    assert await last_line_after(session_id, ":q") == "ACL2 !>"
+
+
+@pytest.mark.asyncio
+async def test_redefinition_query(session_id: str) -> None:
+    """The query that redefinition asks after (redef) ends a reply."""
+    await evaluate(session_id, "(defun redef-me (x) x)")
+    await evaluate(session_id, "(redef)")
+    line = await last_line_after(session_id, "(defun redef-me (x) (+ x 1))")
+    assert line.endswith("?):"), line
+    assert await last_line_after(session_id, "y") == "ACL2 !>"
+    await evaluate(session_id, "(redef-)")
+    assert re.search(r"(^|>)2$", await evaluate(session_id, "(redef-me 1)"), re.M)
+
+
+@pytest.mark.asyncio
+async def test_unknown_prompt(session_id: str) -> None:
+    """When a command times out and ACL2's output ends with an unfinished
+    line that has been quiet, that is taken for the prompt of a read loop
+    acl2-mcp doesn't know, and later commands are sent there.
+
+    Otherwise the next command would wait for the timed-out one, which
+    can't finish without input, and the session would be stuck."""
+    await evaluate(session_id, ":q")
+    text = await evaluate(
+        session_id, '(progn (princ "Your choice? ") (finish-output) (read))', 2)
+    assert "waiting for input at 'Your choice?'" in text, text
+    text = await evaluate(session_id, "42")
+    assert text.index("Your choice?") < text.index("Output of this command")
+    assert re.search(r"(^|[>*?] )42$", text, re.M), text
+    await evaluate(session_id, "(lp)")
+    assert "1337" in await evaluate(session_id, "(+ 1000 337)")
+
+
+async def evaluate_as_is(session_id: str, code: str) -> str:
+    result = await call_tool("evaluate", {
+        "session_id": session_id, "code": code, "timeout": 10, "as_is": True})
+    return result[0].text
+
+
+@pytest.mark.asyncio
+async def test_program_with_its_own_input(session_id: str) -> None:
+    """Input for a program with its own read loop, which needn't be Lisp,
+    gets through: with as_is when the program's prompt looks like ACL2's
+    (so that the code would be read as ACL2 code), and as it is when the
+    prompt is another program's."""
+    def loop(prompt: str) -> str:
+        return (f'(loop (princ "{prompt}") (finish-output) '
+                '(let ((line (read-line))) (when (equal line "quit") (return)) '
+                '(format t "got [~a]~%" line)))')
+    await evaluate(session_id, ":q")
+    assert (await evaluate(session_id, loop("CALC >"))).rstrip().endswith("CALC >")
+    text = await evaluate(session_id, "x = (3")
+    assert "Nothing was sent" in text and "as_is" in text
+    text = await evaluate_as_is(session_id, "x = (3")
+    assert "got [x = (3]" in text and text.rstrip().endswith("CALC >")
+    await evaluate(session_id, "quit")
+    assert (await evaluate(session_id, loop("calc > "))).rstrip().endswith("calc >")
+    assert "got [3 + 4]" in await evaluate(session_id, "3 + 4")
+    await evaluate(session_id, "quit")
+    await evaluate(session_id, "(lp)")
+    assert "1337" in await evaluate(session_id, "(+ 1000 337)")
