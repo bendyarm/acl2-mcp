@@ -346,8 +346,9 @@ windows may have been opened (a script that failed, say because
 Terminal didn't answer in time, may have opened one).  It finds their wrappers with `pgrep`, takes each
 one's tty from `ps`, finds the window with that title and tty while the
 wrapper still runs, stops the wrapper, and closes the window by its id
-only once `ps` shows nothing running on that tty and the window's
-history ends with "[Process completed]" (Terminal has noticed; a window
+only once the processes that ran on that tty have exited (not whatever
+runs on it then: Terminal gives a freed tty to the next window it
+opens) and the window's history ends with "[Process completed]" (Terminal has noticed; a window
 in the background doesn't update its `contents`, so the history is
 read).  Terminal asks "terminate running processes?" when asked to
 close a window that runs something, and what it reports about a tab

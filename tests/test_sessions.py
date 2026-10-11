@@ -658,6 +658,40 @@ async def test_log_viewer_shown_later_closed_when_session_ends(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(server.platform.system() != "Darwin",
+                    reason="Terminal log windows are macOS only")
+async def test_terminal_log_window_closed_when_its_tty_is_reused(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Terminal log window is closed even if, once its processes have
+    exited, another window has its tty.
+
+    Terminal gives a new window the lowest free tty, often the one a log
+    window has just freed.  The window used to be closed only once nothing
+    ran on its tty, so when the next session's window got it, the window
+    stayed open.  Here ps -t shows another window's process on the tty
+    once the window's own are gone.
+    """
+    real_run = server._run
+
+    def run(command: list[str]) -> str:
+        out = real_run(command)
+        if command[:2] == ["ps", "-t"] and not out.strip():
+            out = "99999\n"  # the next window's login, say
+        return out
+
+    monkeypatch.setattr(server, "_run", run)
+    monkeypatch.setattr(session_manager, "config", ServerConfig(
+        session_log=SessionLogConfig(viewer="auto")))
+    session_id, _ = await session_manager.start_session(view_log_in_terminal=True)
+    await asyncio.sleep(1)  # (so that its window is open)
+    await session_manager.end_session(session_id)
+    await asyncio.to_thread(server.wait_for_viewer_closers, 30.0)
+    names = real_run(["osascript", "-e",
+                      'tell application "Terminal" to return name of every window'])
+    assert f"ACL2 Log {session_id[:8]}" not in names
+
+
+@pytest.mark.asyncio
 async def test_broken_pipe_on_send_command() -> None:
     """Test that BrokenPipeError is handled gracefully when sending commands."""
     start_result = await call_tool("start_session", {})

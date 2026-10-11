@@ -1755,8 +1755,8 @@ def _stop_terminal_tail(pattern: str, window_title: str) -> None:
     window that still runs a process, and what it reports for a tab (its
     tty, its processes) can be stale.  So each wrapper's tty comes from
     ps; the window is found by its title and that tty while the wrapper
-    still runs; and it is closed (by id) only once ps shows nothing at all
-    running on that tty and Terminal has noticed: the last line of the
+    still runs; and it is closed (by id) only once the processes that ran
+    on that tty have exited and Terminal has noticed: the last line of the
     window's history is "[Process completed]".  (Closed as soon as ps
     showed the tty idle, a window could still bring up the dialog.)  When
     in doubt, the window is left open.
@@ -1783,6 +1783,9 @@ def _stop_terminal_tail(pattern: str, window_title: str) -> None:
                 if len(stopped) >= windows or time.time() >= deadline:
                     break
                 time.sleep(0.25)
+        if len(stopped) < windows:
+            _debug_log(f"close_log_viewer: found {len(stopped)} of {windows} "
+                       f"wrappers for {window_title}")
     finally:
         _viewer_closers.discard(threading.current_thread())
 
@@ -1792,7 +1795,12 @@ def _stop_terminal_wrapper(pid: int, window_title: str) -> None:
     WINDOW_TITLE (see _stop_terminal_tail)."""
     tty = _run(["ps", "-o", "tty=", "-p", str(pid)]).strip()
     window = ""
+    processes = ""
     if re.fullmatch(r"ttys\d+", tty):
+        # The window's processes (login, the wrapper, tail), waited for
+        # below.  Not whatever runs on the tty then: once they have
+        # exited, Terminal gives the tty to the next window it opens.
+        processes = ",".join(_run(["ps", "-t", tty, "-o", "pid="]).split())
         window = _run(["osascript", "-e", (
             'tell application "Terminal"\n'
             '    repeat with w in windows\n'
@@ -1815,7 +1823,7 @@ def _stop_terminal_wrapper(pid: int, window_title: str) -> None:
     lines: list[str] = []
     while time.time() < deadline:
         time.sleep(0.2)
-        if _run(["ps", "-t", tty, "-o", "pid="]).strip():
+        if processes and _run(["ps", "-p", processes, "-o", "pid="]).strip():
             continue
         # The end of the history, not the contents: a window in the
         # background doesn't update its contents
@@ -1827,13 +1835,13 @@ def _stop_terminal_wrapper(pid: int, window_title: str) -> None:
             'return h\n')])
         lines = [line for line in history.splitlines() if line.strip()]
         if lines and lines[-1].strip() == "[Process completed]":
-            _run(["osascript", "-e", (
-                'tell application "Terminal"\n'
-                f'    try\n        close window id {window}\n    end try\n'
-                'end tell\n')])
+            _run(["osascript", "-e",
+                  f'tell application "Terminal" to close window id {window}'])
+            _debug_log(f"close_log_viewer: closed {window_title} (window {window})")
             return
     _debug_log(f"close_log_viewer: left {window_title} open (window {window}), "
-               f"last line {lines[-1] if lines else ''!r}")
+               f"last line {lines[-1] if lines else ''!r}, still running: "
+               f"{_run(['ps', '-p', processes, '-o', 'pid=,command=']).strip()!r}")
 
 
 def _run(command: list[str]) -> str:
