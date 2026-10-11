@@ -46,7 +46,9 @@ it afterwards.
 Sessions use prompt detection to identify command completion:
 - Commands are split into top-level forms (`acl2_mcp/reader.py`) and sent via
   the PTY master one form at a time, each once ACL2 has printed its prompt
-  after the one before; unreadable code is rejected before anything is sent
+  after the one before; unreadable code, and code with a C-c, C-\ or C-z
+  (which the terminal would turn into a signal), is rejected before
+  anything is sent
 - Background reader continuously captures output to a buffer
 - `send_command()` waits for prompt patterns to appear in output
 - Prompt patterns match ACL2 (`.*>[ ]*$`, which covers break-rewrite,

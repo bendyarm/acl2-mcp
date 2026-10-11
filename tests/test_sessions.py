@@ -334,9 +334,10 @@ async def test_line_editing_characters_reach_acl2(session_id: str) -> None:
 
     In canonical mode DEL, C-u and C-w erased input and C-d ended it (at
     the start of a line, ACL2 saw end of file and aborted).  C-o discarded
-    output (macOS), C-s stopped it, and C-t printed a status line.
+    output (macOS), C-s stopped it, C-t printed a status line, and C-y
+    suspended ACL2 when it read it (macOS).
     """
-    s = "a\x7fb\x15c\x17d\x04e\x0ff\x13g\x14h\n\x04i"
+    s = "a\x7fb\x15c\x17d\x04e\x0ff\x13g\x14h\x19j\n\x04i"
     s += "x" * (4321 - len(s))
     result = await call_tool("evaluate", {
         "session_id": session_id, "code": f'(length "{s}")', "timeout": 10})
@@ -793,6 +794,22 @@ async def test_unreadable_code_is_not_sent(session_id: str) -> None:
     assert "ACL2 Error" in text  # the defun wasn't sent either
     text = await evaluate(session_id, "; only a comment")
     assert "Nothing to evaluate" in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("char", ["\x03", "\x1c", "\x1a"])
+async def test_signal_characters_are_not_sent(session_id: str, char: str) -> None:
+    """Code with a character that the terminal turns into a signal is
+    rejected, as is or not: C-c would interrupt ACL2, C-\\ would send it
+    SIGQUIT, which can end the session, and C-z would suspend it."""
+    code = f'(defun not-sent () "a{char}b")'
+    for text in (await evaluate(session_id, code),
+                 await evaluate_as_is(session_id, code)):
+        assert "Nothing was sent" in text and f"(code {ord(char)})" in text
+    text = await evaluate(session_id, "(not-sent)")
+    assert "ACL2 Error" in text
+    text = await evaluate(session_id, "(+ 1000 337)")
+    assert "1337" in text
 
 
 @pytest.mark.asyncio

@@ -285,6 +285,15 @@ def validate_integer_parameter(value: int, min_value: int, max_value: int, name:
     return value
 
 
+# What the characters that ACL2's terminal turns into signals (ISIG) would
+# do to ACL2, by their termios index (see ACL2Session.signal_characters)
+_SIGNAL_EFFECTS = {
+    termios.VINTR: "interrupt ACL2",
+    termios.VQUIT: "send ACL2 SIGQUIT, which can end the session",
+    termios.VSUSP: "suspend ACL2, leaving the session hung",
+}
+
+
 @dataclass
 class ACL2Session:
     """
@@ -322,6 +331,12 @@ class ACL2Session:
     _unreported_from: Optional[int] = None
     # The host Lisp's reader syntax (see start_session)
     syntax: reader.Syntax = reader.SBCL
+    # The characters that ACL2's terminal turns into signals, and what
+    # each would do (see _signal_character)
+    signal_characters: dict[bytes, str] = field(default_factory=lambda: {
+        b"\x03": _SIGNAL_EFFECTS[termios.VINTR],
+        b"\x1c": _SIGNAL_EFFECTS[termios.VQUIT],
+        b"\x1a": _SIGNAL_EFFECTS[termios.VSUSP]})
     reader_registered: bool = False  # Track whether loop.add_reader was called
     ring_buffer: bytearray = field(default_factory=bytearray)
     max_ring_buffer_size: int = 65536  # 64KB rolling buffer
@@ -441,7 +456,9 @@ class ACL2Session:
                 earlier = self._take_unreported_output()
 
                 data = f"{command}\n".encode()
-                plan = [len(data)] if as_is else self._plan_units(data)
+                refusal = self._signal_character(data)
+                plan = ([len(data)] if as_is or refusal
+                        else self._plan_units(data))
 
                 # Capture the output sequence counter BEFORE adding anything
                 # to queues or writing to PTY.  During the await calls below,
@@ -464,11 +481,16 @@ class ACL2Session:
                 # Timestamp after input (preserve original format)
                 seq_id = await self._get_next_sequence_id()
                 current_time = time.strftime("%Y-%m-%d %H:%M:%S")
-                if isinstance(plan, str) or not plan:
-                    reason = plan or "only comments and whitespace"
+                if refusal or isinstance(plan, str) or not plan:
+                    reason = refusal or plan or "only comments and whitespace"
                     await self.merge_queue.put((
                         timestamp_mono, seq_id, "stdin",
                         f"[{current_time} NOT SENT: {reason}]\n"))
+                    if refusal:
+                        return (earlier + f"Error: Nothing was sent, because "
+                                f"{refusal}.  (To interrupt ACL2, call "
+                                f"interrupt_session.  In ACL2 code, "
+                                f"(code-char N) is the character with code N.)")
                     if not plan:
                         return (earlier + "Nothing to evaluate: the code has "
                                 "only comments and whitespace.")
@@ -586,6 +608,21 @@ class ACL2Session:
             except Exception:
                 # SECURITY: Don't leak internal details in error messages
                 return "Error: Failed to execute command in session"
+
+    def _signal_character(self, data: bytes) -> str:
+        """Why DATA can't be sent, if it has a character that ACL2's
+        terminal turns into a signal (C-c, C-\\ or C-z); otherwise ""."""
+        found = [(data.find(char), char) for char in self.signal_characters
+                 if char in data]
+        if not found:
+            return ""
+        position, char = min(found)
+        line = data.count(b"\n", 0, position) + 1
+        column = position - (data.rfind(b"\n", 0, position) + 1) + 1
+        return (f"the code has a C-{chr(char[0] ^ 0x40).lower()} character "
+                f"(code {char[0]}) at line {line}, column {column}, which the "
+                f"terminal would turn into a signal that would "
+                f"{self.signal_characters[char]}")
 
     def _plan_units(self, data: bytes) -> list[int] | str:
         """Where to split DATA, a command ending with a newline, into units
@@ -1832,8 +1869,10 @@ class SessionManager:
             # a line, ACL2 sees end of file).  IEXTEN (on macOS: C-o, C-v,
             # C-y) and IXON (C-s, C-q) would still make the terminal
             # swallow bytes of a command.  ISIG stays on: interrupt()
-            # sends C-c.  ECHO is off, so that the output is only ACL2's
-            # (the input is logged separately).
+            # sends C-c, and send_command refuses code with C-c, C-\ or
+            # C-z.  ECHO is off, so that the output is only ACL2's (the
+            # input is logged separately).
+            signal_characters: dict[bytes, str] | None = None
             try:
                 attrs = termios.tcgetattr(slave_fd)
                 attrs[0] &= ~termios.IXON
@@ -1841,6 +1880,10 @@ class SessionManager:
                 attrs[6][termios.VMIN] = 1  # read() waits for one byte...
                 attrs[6][termios.VTIME] = 0  # ...however long that takes
                 termios.tcsetattr(slave_fd, termios.TCSANOW, attrs)
+                signal_characters = {
+                    attrs[6][index]: effect
+                    for index, effect in _SIGNAL_EFFECTS.items()
+                    if attrs[6][index] not in (b"\x00", b"\xff")}  # disabled
             except termios.error:
                 # If termios setup fails, continue anyway - not critical
                 pass
@@ -1905,6 +1948,8 @@ class SessionManager:
                 ring_buffer=bytearray(),
                 tool_output_config=self.config.tool_output,
             )
+            if signal_characters is not None:
+                session.signal_characters = signal_characters
 
             # Start background I/O tasks immediately
             # Use event-driven reader for PTY master

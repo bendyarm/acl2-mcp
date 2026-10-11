@@ -146,7 +146,10 @@ characters that send signals:
 - **`IXON` is off.**  It makes the terminal swallow C-s and C-q, which
   stop and restart ACL2's output.
 - **`ISIG` stays on**, so that `interrupt()` can send C-c.  A C-c, C-\
-  or C-z in a command signals ACL2 too.
+  or C-z in a command would signal ACL2 too (interrupt it, send it
+  SIGQUIT, which can end the session, or suspend it), so `send_command`
+  refuses a command that has one, sending none of it.  The characters
+  come from the terminal's settings.
 - **`ECHO` is off**, so the output holds only what ACL2 prints; the
   input is logged separately.
 
@@ -300,7 +303,8 @@ to interrupt again.
 
 1. Acquire session lock
 2. Wait for an earlier command that timed out to finish
-3. Split the command into forms, or reject it
+3. Split the command into forms, or reject it (unreadable, or with a
+   C-c, C-\ or C-z)
 4. Log input with timestamp
 5. Send the forms one at a time (see One Form at a Time)
 6. Wait for the prompt after the last form
