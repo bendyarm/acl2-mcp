@@ -357,6 +357,15 @@ The wrapper's `pgrep` pattern is anchored at the start of the command
 line, so that it can't match the `osascript` processes, whose arguments
 mention the log too.
 
+On Linux the viewer is the first of `gnome-terminal`, `xterm` and
+`konsole` that is installed, running `tail -f` on the log; without a
+display (neither `DISPLAY` nor `WAYLAND_DISPLAY` set) none is opened.
+It gets none of the server's stdin, stdout and stderr, which carry the
+MCP messages.  For a log whose window was opened, `close_log_viewer`
+(in a thread) stops the `tail` with `pkill`, using a pattern anchored at
+the start of the command line, and the emulator then closes its window.  The window isn't found or raised
+again: `show_session_log` opens another, and closing stops them all.
+
 ## Book Certification
 
 `certify_book` runs `cert.pl` as a separate process, not in a session.

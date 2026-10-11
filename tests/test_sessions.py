@@ -21,7 +21,9 @@ before the window's shell has started tail.
 import asyncio
 import os
 import re
+import subprocess
 import time
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -327,6 +329,50 @@ async def test_long_line(session_id: str) -> None:
         "session_id": session_id, "code": code, "timeout": 30})
     assert "70000" in result[0].text
 
+
+
+def test_linux_log_viewer_gets_no_server_stdio(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """On Linux the terminal emulator doesn't inherit the server's stdin,
+    stdout and stderr, which carry the MCP messages; and without a display
+    there is no emulator to start."""
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+    monkeypatch.setattr(server.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(server.subprocess, "Popen",
+                        lambda cmd, **kwargs: calls.append((cmd, kwargs)))
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    server.open_log_viewer(tmp_path / "x.log", 50, "abc")
+    assert not calls  # no display, no window
+    monkeypatch.setenv("DISPLAY", ":0")
+    server.open_log_viewer(tmp_path / "x.log", 50, "abc")
+    [(cmd, kwargs)] = calls
+    assert cmd[-4:] == ["tail", "-n50", "-f", str(tmp_path / "x.log")]
+    for stream in ("stdin", "stdout", "stderr"):
+        assert kwargs[stream] == server.subprocess.DEVNULL
+
+
+def test_linux_log_viewer_closed(monkeypatch: pytest.MonkeyPatch,
+                                 tmp_path: Path) -> None:
+    """On Linux, closing a log viewer stops its tail (the emulator then
+    closes its window), and only that tail."""
+    log, other = tmp_path / "s1-x.log", tmp_path / "s2-x.log"
+    log.write_text("")
+    other.write_text("")
+    tails = [subprocess.Popen(server._linux_tail_command(f, 50),
+                              stdout=subprocess.DEVNULL) for f in (log, other)]
+    try:
+        time.sleep(0.5)
+        monkeypatch.setattr(server.platform, "system", lambda: "Linux")
+        monkeypatch.setattr(server, "_linux_viewer_logs", {str(log), str(other)})
+        server.close_log_viewer("s1", log)
+        server.wait_for_viewer_closers(20.0)
+        assert tails[0].wait(timeout=5) is not None
+        assert tails[1].poll() is None
+    finally:
+        for tail in tails:
+            tail.kill()
+            tail.wait()
 
 @pytest.mark.asyncio
 async def test_line_editing_characters_reach_acl2(session_id: str) -> None:

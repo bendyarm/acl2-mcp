@@ -1533,6 +1533,23 @@ def _run_osascripts() -> None:
             _viewer_lock.notify_all()
 
 
+def _linux_tail_command(log_file: Path, lines: int) -> list[str]:
+    """The command a Linux terminal log window runs.  Stopping it closes
+    the window (see _stop_linux_tail)."""
+    return ["tail", f"-n{lines}", "-f", str(log_file)]
+
+
+def _linux_tail_pattern(log_file: Path) -> str:
+    """A pkill -f pattern for the command that _linux_tail_command makes.
+    Anchored at the start of the command line, so that it can't match
+    another command that mentions the log."""
+    return f"^tail -n[0-9]+ -f .*{log_file.name}$"
+
+
+# The logs that Linux terminal windows were opened for (see close_log_viewer)
+_linux_viewer_logs: set[str] = set()
+
+
 def open_log_viewer(
     log_file: Path, lines: int = 50, session_id: str = "", viewer: str = "auto"
 ) -> None:
@@ -1566,15 +1583,24 @@ def open_log_viewer(
                        + "end tell\n")
 
         elif system == "Linux":
-            # Try different terminal emulators
+            # Without a display (a remote server, say) no window can open
+            if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+                return
+            # Try different terminal emulators.  None of them gets the
+            # server's stdin, stdout or stderr: they carry the MCP
+            # messages, which a warning from the emulator would corrupt.
+            tail = _linux_tail_command(log_file, lines)
             terminals = [
-                ["gnome-terminal", "--", "tail", f"-n{lines}", "-f", str(log_file)],
-                ["xterm", "-e", "tail", f"-n{lines}", "-f", str(log_file)],
-                ["konsole", "-e", "tail", f"-n{lines}", "-f", str(log_file)],
+                ["gnome-terminal", "--", *tail],
+                ["xterm", "-e", *tail],
+                ["konsole", "-e", *tail],
             ]
             for cmd in terminals:
                 try:
-                    subprocess.Popen(cmd)
+                    subprocess.Popen(cmd, stdin=subprocess.DEVNULL,
+                                     stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL)
+                    _linux_viewer_logs.add(str(log_file))
                     break
                 except FileNotFoundError:
                     continue
@@ -1657,7 +1683,8 @@ def close_log_viewer(
     For the "emacs" backend, kills the tail buffer/process and removes its
     window via acl2-mcp-close-log.  For the macOS Terminal backend, stops
     the window's tail wrapper and closes the window (see
-    _stop_terminal_tail).
+    _stop_terminal_tail).  On Linux, stops the windows' tail, which closes
+    them (see _stop_linux_tail).
     Silently does nothing if the window or process doesn't exist.
     """
     if viewer == "none":
@@ -1682,11 +1709,41 @@ def close_log_viewer(
                 daemon=True)
             _viewer_closers.add(thread)
             thread.start()
+        elif system == "Linux":
+            if log_file is None or str(log_file) not in _linux_viewer_logs:
+                return
+            _linux_viewer_logs.discard(str(log_file))
+            thread = threading.Thread(
+                target=_stop_linux_tail,
+                args=(_linux_tail_pattern(log_file),), daemon=True)
+            _viewer_closers.add(thread)
+            thread.start()
     except Exception:
         pass
 
 
-# Threads closing Terminal log windows (see wait_for_viewer_closers)
+def _stop_linux_tail(pattern: str) -> None:
+    """Stop the tail processes matching PATTERN (see _linux_tail_pattern):
+    a terminal emulator closes its window when its command exits.  Runs in
+    a thread.  A window can take a while to start tail, so this tries for
+    up to 15 seconds."""
+    try:
+        deadline = time.time() + 15.0
+        while True:
+            try:
+                if subprocess.run(["pkill", "-f", pattern], capture_output=True,
+                                  timeout=10).returncode == 0:
+                    break
+            except Exception:
+                pass
+            if time.time() >= deadline:
+                break
+            time.sleep(0.25)
+    finally:
+        _viewer_closers.discard(threading.current_thread())
+
+
+# Threads closing log windows (see wait_for_viewer_closers)
 _viewer_closers: set[threading.Thread] = set()
 
 
