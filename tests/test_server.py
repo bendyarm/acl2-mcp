@@ -104,6 +104,16 @@ async def test_call_tool_certify_book_nonexistent() -> None:
     assert "not found" in result[0].text.lower()
 
 
+@pytest.mark.asyncio
+async def test_certify_book_relative_path_not_found() -> None:
+    """A relative book path that names no book says where it was looked
+    for: in the MCP server's working directory."""
+    result = await call_tool("certify_book", {"file_path": "no/such/book.lisp"})
+    text = result[0].text
+    assert "Book not found" in text and "no/such/book.lisp" in text
+    assert os.getcwd() in text
+
+
 def slow_book(directory: Path) -> str:
     """Write a book that takes a minute to certify; return its name.
 

@@ -294,6 +294,12 @@ _SIGNAL_EFFECTS = {
 }
 
 
+def _session_not_found(session_id: str) -> str:
+    """The error for a tool call naming SESSION_ID, which isn't a session."""
+    return (f"Error: Session {session_id} not found (list_sessions shows "
+            f"the active sessions)")
+
+
 @dataclass
 class ACL2Session:
     """
@@ -418,8 +424,8 @@ class ACL2Session:
         async with self.lock:
             self.last_activity = time.time()
 
-            if self.master_fd is None:
-                return "Error: Session PTY master is not available"
+            if self.exited or self.master_fd is None:
+                return self._exited_message()
 
             # SECURITY: Validate code length to prevent memory exhaustion
             if len(command) > MAX_CODE_LENGTH:
@@ -509,7 +515,7 @@ class ACL2Session:
                     data, cuts, 0, 0, self.candidate_seq, deadline, interrupts)
                 sent = min((cuts[unit - 1] if unit else 0) + written, len(data))
                 if outcome == "closed":
-                    return "Error: Session terminated during command execution"
+                    return earlier + await self._exited_reply(start_seq_id)
                 if outcome == "timeout":
                     # As for any timeout, leave ACL2 working; send it the
                     # rest of the command as it finishes each form.
@@ -556,7 +562,7 @@ class ACL2Session:
                 outcome = await self._wait_for_prompt(start_prompt_seq, deadline,
                                                       None)
                 if outcome == "closed":
-                    return "Error: Session terminated during command execution"
+                    return earlier + note + await self._exited_reply(start_seq_id)
                 if outcome == "timeout":
                     self._unreported_from = start_seq_id
                     # If ACL2's output ends with a prompt that doesn't
@@ -603,11 +609,42 @@ class ACL2Session:
 
             except OSError as e:
                 if e.errno in (errno.EIO, errno.EBADF, errno.EPIPE):
-                    return "Error: Session connection lost"
-                return "Error: Failed to execute command in session"
+                    return self._exited_message()  # (the terminal is gone)
+                return self._internal_error_message()
             except Exception:
                 # SECURITY: Don't leak internal details in error messages
-                return "Error: Failed to execute command in session"
+                return self._internal_error_message()
+
+    @property
+    def exited(self) -> bool:
+        """Has ACL2 exited (or its terminal gone)?"""
+        return self.shutdown_event.is_set() or self.process.returncode is not None
+
+    def _exited_message(self) -> str:
+        """The error for a command or interrupt in a session whose ACL2 has
+        exited."""
+        log = (f"  The session log has ACL2's last output: {self.log_file}"
+               if self.log_file else "")
+        return ("Error: ACL2 has exited in this session, so the session's "
+                "world is gone and nothing more can run in it.  Start a new "
+                f"session (end_session removes this one).{log}")
+
+    async def _exited_reply(self, start_seq_id: int) -> str:
+        """The reply to a command during which ACL2 exited: its output after
+        sequence ID START_SEQ_ID (an error message, say), then why nothing
+        more can run in the session."""
+        await asyncio.sleep(0.05)  # let the logger catch up
+        output = "".join(line for sid, line in self.output_buffer
+                         if sid > start_seq_id).strip()
+        output = elide_large_output(output, self.tool_output_config, self.log_file)
+        return (output + "\n\n" if output else "") + self._exited_message()
+
+    def _internal_error_message(self) -> str:
+        """The error for a command that acl2-mcp itself failed on."""
+        log = f"  Session log: {self.log_file}" if self.log_file else ""
+        return ("Error: acl2-mcp failed while sending the command (an internal "
+                "error), and some of it may have reached ACL2.  Check the "
+                f"session log before going on.{log}")
 
     def _signal_character(self, data: bytes) -> str:
         """Why DATA can't be sent, if it has a character that ACL2's
@@ -874,11 +911,8 @@ class ACL2Session:
             Status message and ACL2's response, or an error message
         """
         try:
-            if self.master_fd is None:
-                return "Error: Session PTY master is not available"
-
-            if self.process.returncode is not None:
-                return "Error: Session process has already terminated"
+            if self.exited or self.master_fd is None:
+                return self._exited_message()
 
             # Stop any command still being written (see _write_input), and
             # one finishing in the background (_finish_command): the rest
@@ -1913,6 +1947,10 @@ class SessionManager:
 
         session_id = str(uuid.uuid4())
 
+        if cwd is not None and not os.path.isdir(cwd):
+            problem = "not a directory" if os.path.exists(cwd) else "no such directory"
+            return "", f"Error: Can't start a session in {cwd}: {problem}"
+
         try:
             # Create pseudo-terminal (pty) for ACL2 process
             # This makes SBCL think it's running interactively, ensuring unbuffered output
@@ -1974,15 +2012,21 @@ class SessionManager:
 
             # Spawn ACL2 process with slave as stdin/stdout/stderr
             # Note: We call 'acl2' directly, no wrapper script needed
-            process = await asyncio.create_subprocess_exec(
-                "acl2",
-                stdin=slave_fd,
-                stdout=slave_fd,
-                stderr=slave_fd,
-                cwd=cwd,
-                env=env,
-                preexec_fn=setup_controlling_tty,  # Critical for proper terminal setup
-            )
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    "acl2",
+                    stdin=slave_fd,
+                    stdout=slave_fd,
+                    stderr=slave_fd,
+                    cwd=cwd,
+                    env=env,
+                    preexec_fn=setup_controlling_tty,  # Critical for proper terminal setup
+                )
+            except FileNotFoundError:
+                os.close(master_fd)
+                os.close(slave_fd)
+                return "", ("Error: Can't start ACL2: there is no acl2 command "
+                            "in the MCP server's PATH")
 
             # Remember the slave's name for _flush_pty_input, then close
             # slave_fd in parent process (child inherited it)
@@ -2037,8 +2081,12 @@ class SessionManager:
             # that prompt would take the prompt after the file for its own.
             start_time = time.time()
             while (session.prompt_seq == 0 and time.time() - start_time < 30.0
-                   and not session.shutdown_event.is_set()):
+                   and not session.exited):
                 await asyncio.sleep(0.1)
+            if session.exited:
+                await session.terminate()
+                log = f"  The session log has its output: {log_file}" if log_file else ""
+                return "", f"Error: ACL2 exited while starting.{log}"
 
             # The host Lisp decides some of the reader's syntax
             if b"Welcome to Clozure Common Lisp" in session.ring_buffer:
@@ -2061,6 +2109,10 @@ class SessionManager:
             message = f"Session started successfully. ID: {session_id}"
             if enable_logging:
                 message += f"\nLog file: {session.log_file}"
+            if session.prompt_seq == 0:
+                message += ("\nNote: ACL2 hasn't shown its prompt within 30 "
+                            "seconds; it may still be starting.  The session "
+                            "log shows what it is doing.")
             return session_id, message
 
         except Exception:
@@ -2079,7 +2131,7 @@ class SessionManager:
         """
         session = self.sessions.get(session_id)
         if not session:
-            return f"Error: Session {session_id} not found"
+            return _session_not_found(session_id)
 
         # terminate() logs the SESSION ENDED marker and closes the log viewer
         await session.terminate()
@@ -2107,7 +2159,7 @@ class SessionManager:
         """
         session = self.sessions.get(session_id)
         if not session:
-            return f"Error: Session {session_id} not found"
+            return _session_not_found(session_id)
 
         return await session.interrupt()
 
@@ -2126,9 +2178,11 @@ class SessionManager:
             age = time.time() - session.created_at
             idle = time.time() - session.last_activity
             name_str = f" ({session.name})" if session.name else ""
+            exited = ("; ACL2 has exited, so nothing can run in it"
+                      if session.exited else "")
             lines.append(
                 f"  {session_id}{name_str}: "
-                f"age={age:.0f}s, idle={idle:.0f}s"
+                f"age={age:.0f}s, idle={idle:.0f}s{exited}"
             )
 
         return "\n".join(lines)
@@ -2250,7 +2304,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="list_sessions",
-            description="List all active ACL2 sessions with their IDs, names, age, and idle time. Use this to see which sessions are available and their current state.",
+            description="List all active ACL2 sessions with their IDs, names, age, and idle time, marking any whose ACL2 has exited. Use this to see which sessions are available and their current state.",
             inputSchema={
                 "type": "object",
                 "properties": {},
@@ -2439,6 +2493,12 @@ async def certify_acl2_book(
     """
     # Remove .lisp extension if present
     book_path = str(Path(file_path).with_suffix(""))
+    book_file = Path(book_path + ".lisp")
+    if not book_file.is_file():
+        where = ("" if book_file.is_absolute() else
+                 f" (a relative path is resolved against the MCP server's "
+                 f"working directory, {os.getcwd()})")
+        return f"Error: Book not found: no file {book_file}{where}"
 
     # Build cert.pl command with -j flag
     cmd_args = ["cert.pl", f"-j{jobs}", book_path]
@@ -2734,7 +2794,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             return [
                 TextContent(
                     type="text",
-                    text=f"Error: Session {session_id} not found",
+                    text=_session_not_found(session_id),
                 )
             ]
         if not session.log_file:
@@ -2777,7 +2837,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
             return [
                 TextContent(
                     type="text",
-                    text=f"Error: Session {session_id} not found",
+                    text=_session_not_found(session_id),
                 )
             ]
         output = await session.send_command(code, timeout, as_is)

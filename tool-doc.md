@@ -50,7 +50,7 @@ End an ACL2 session; its world is lost (a busy ACL2 is killed). Don't end a sess
 
 ### list_sessions
 
-List all active ACL2 sessions with their IDs, names, age, and idle time. Use this to see which sessions are available and their current state.
+List all active ACL2 sessions with their IDs, names, age, and idle time, marking any whose ACL2 has exited. Use this to see which sessions are available and their current state.
 
 **Parameters:**
 

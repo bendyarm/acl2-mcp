@@ -1,21 +1,7 @@
 """Tests for ACL2 MCP server session functionality.
 
-Known failures as of 2026-04-05:
-- test_eof_detection: Flaky — killing the ACL2 process doesn't always
-  prevent it from responding to the next command, due to process
-  termination timing.
-
-Pre-existing failures in other test files (not in this file):
+Pre-existing failure in another test file:
 - test_security.py::test_validate_timeout_handles_invalid_type
-- test_server.py::test_call_tool_certify_book_nonexistent: Test expects
-  "not found" but make returns "No rule to make target".
-
-Terminal window cleanup note:
-test_eof_detection fails before it ends its session, leaving its log
-viewer window open.  test_cleanup_all_with_dead_sessions usually leaves
-one open too: its sessions end within a second of starting, and the
-Terminal viewer's close (which kills the window's tail process) can run
-before the window's shell has started tail.
 """
 
 import asyncio
@@ -712,8 +698,7 @@ async def test_broken_pipe_on_send_command() -> None:
     })
 
     assert len(result) == 1
-    # Should get error message about broken pipe or connection lost
-    assert "broken pipe" in result[0].text.lower() or "connection lost" in result[0].text.lower()
+    assert "ACL2 has exited" in result[0].text
 
     # Cleanup
     await call_tool("end_session", {"session_id": session_id})
@@ -766,39 +751,36 @@ async def test_cleanup_all_with_dead_sessions() -> None:
 
 
 @pytest.mark.asyncio
-async def test_eof_detection() -> None:
-    """Test that EOF from session process is detected properly."""
-    start_result = await call_tool("start_session", {})
-    session_id = extract_session_id(start_result[0].text)
+async def test_acl2_exit_reported(session_id: str) -> None:
+    """When ACL2 exits, the reply says so, and so does every later call on
+    the session: its world is gone, and a new session is needed.
 
-    # Get the session
-    session = session_manager.get_session(session_id)
-    assert session is not None
+    There used to be four messages for this ("Session terminated during
+    command execution", "Session connection lost", ...), none saying what
+    to do, and list_sessions listed the session like any other.
+    """
+    text = await evaluate(session_id, "(good-bye)")
+    assert "ACL2 has exited" in text and "Start a new session" in text
+    text = await evaluate(session_id, "(+ 1 1)")
+    assert "ACL2 has exited" in text
+    result = await call_tool("interrupt_session", {"session_id": session_id})
+    assert "ACL2 has exited" in result[0].text
+    result = await call_tool("list_sessions", {})
+    line = next(line for line in result[0].text.splitlines() if session_id in line)
+    assert "ACL2 has exited" in line
 
-    # Send a command that will cause the process to exit
-    # (good-bye exits ACL2)
-    if session.process.stdin:
-        try:
-            session.process.stdin.write(b"(good-bye)\n")
-            await session.process.stdin.drain()
-        except (BrokenPipeError, ConnectionResetError):
-            pass
 
-    # Wait a bit for process to exit
-    await asyncio.sleep(0.5)
-
-    # Try to send another command - should detect terminated process
-    result = await call_tool("evaluate", {
-        "code": "(+ 1 1)",
-        "session_id": session_id
-    })
-
-    assert len(result) == 1
-    # Should get error about terminated process or broken pipe
-    assert "terminated" in result[0].text.lower() or "connection lost" in result[0].text.lower() or "broken pipe" in result[0].text.lower()
-
-    # Cleanup
-    await call_tool("end_session", {"session_id": session_id})
+@pytest.mark.asyncio
+async def test_start_session_in_missing_directory(tmp_path: Path) -> None:
+    """A session asked to start in a directory that doesn't exist says so
+    (the reply used to be "Failed to start session")."""
+    result = await call_tool("start_session", {"cwd": str(tmp_path / "missing")})
+    assert "no such directory" in result[0].text
+    (tmp_path / "file").write_text("")
+    result = await call_tool("start_session", {"cwd": str(tmp_path / "file")})
+    assert "not a directory" in result[0].text
+    result = await call_tool("list_sessions", {})
+    assert "No active sessions" in result[0].text
 
 
 async def evaluate(session_id: str, code: str, timeout: int = 30) -> str:
