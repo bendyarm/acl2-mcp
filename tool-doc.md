@@ -1,8 +1,8 @@
 # ACL2 MCP Server - Tool Reference
 
-> **Note**: This documentation was automatically extracted from the tool definitions in `acl2_mcp/server.py` on 2025-11-03. The source of truth for tool behavior is the Python code itself.
+> **Note**: The tool sections of this file are generated from the tool definitions in `acl2_mcp/server.py` by `scripts/gen_tool_doc.py`: change a description there, then run `python scripts/gen_tool_doc.py`.  The General Notes section at the end is written by hand.
 
-This document provides detailed reference documentation for all 9 tools provided by the ACL2 MCP server.
+This document describes the 9 tools of the ACL2 MCP server, as an agent sees them: each tool's description and parameters.
 
 ## Table of Contents
 
@@ -19,6 +19,7 @@ This document provides detailed reference documentation for all 9 tools provided
 - [Documentation Tools](#documentation-tools)
   - [xdoc_search](#xdoc_search)
   - [xdoc_show](#xdoc_show)
+- [General Notes](#general-notes)
 
 ---
 
@@ -30,11 +31,11 @@ Start a persistent ACL2 session, whose world (definitions, theorems, included bo
 
 **Parameters:**
 
-- `name` (optional): Optional human-readable name for the session. Example: 'natural-numbers-proof'
-- `enable_logging` (optional): If true, log all I/O to a session file in ~/.acl2-mcp/sessions/ (default: true)
-- `view_log_in_terminal` (optional): If true, open a terminal window tailing the session log and bring it to the foreground. If not specified, uses the config default (built-in default: true).
-- `log_tail_lines` (optional): Number of lines to show in log viewer (default: 50)
-- `cwd` (optional): Optional working directory for the ACL2 process; relative include-book and ld paths are resolved against it. If not specified, uses the MCP server's working directory. Example: '/Users/user/acl2/books/kestrel/axe/x86/examples/switch'
+- `name` (string, optional): Optional human-readable name for the session. Example: 'natural-numbers-proof'
+- `enable_logging` (boolean, optional): If true, log all I/O to a session file in ~/.acl2-mcp/sessions/ (default: true)
+- `view_log_in_terminal` (boolean, optional): If true, open a terminal window tailing the session log and bring it to the foreground. If not specified, uses the config default (built-in default: true).
+- `log_tail_lines` (number, optional): Number of lines to show in log viewer (default: 50)
+- `cwd` (string, optional): Optional working directory for the ACL2 process; relative include-book and ld paths are resolved against it. If not specified, uses the MCP server's working directory. Example: '/Users/user/acl2/books/kestrel/axe/x86/examples/switch'
 
 ---
 
@@ -44,7 +45,7 @@ End an ACL2 session; its world is lost (a busy ACL2 is killed). Don't end a sess
 
 **Parameters:**
 
-- `session_id` (required): ID of the session to end
+- `session_id` (string, required): ID of the session to end
 
 ---
 
@@ -64,7 +65,7 @@ Interrupt ACL2 like Ctrl-C: aborts the form being evaluated and discards any par
 
 **Parameters:**
 
-- `session_id` (required): ID of the session to interrupt
+- `session_id` (string, required): ID of the session to interrupt
 
 ---
 
@@ -74,8 +75,8 @@ Show the session log in a terminal window. If a Terminal window is already taili
 
 **Parameters:**
 
-- `session_id` (required): ID of the session whose log to show
-- `log_tail_lines` (optional): Number of lines to show initially if opening a new window (default: 50)
+- `session_id` (string, required): ID of the session whose log to show
+- `log_tail_lines` (number, optional): Number of lines to show initially if opening a new window (default: 50)
 
 ---
 
@@ -87,10 +88,10 @@ Send code to an ACL2 session as if typed at its prompt: events (defun, defthm, i
 
 **Parameters:**
 
-- `code` (required): ACL2 code to evaluate
-- `timeout` (optional): Seconds to wait for the whole command (no limit if not given). On a timeout ACL2 is not interrupted: it keeps working (the rest of a command not yet fully sent is still sent), and the next evaluate waits for it to finish and shows its output first. Check the session log, then wait or call interrupt_session; don't end the session.
-- `session_id` (required): ID of the session to use
-- `as_is` (optional): Send the code exactly as given, in one piece, without reading it as ACL2 code: for a program that reads its own kind of input (default false).
+- `code` (string, required): ACL2 code to evaluate
+- `timeout` (number, optional): Seconds to wait for the whole command (no limit if not given). On a timeout ACL2 is not interrupted: it keeps working (the rest of a command not yet fully sent is still sent), and the next evaluate waits for it to finish and shows its output first. Check the session log, then wait or call interrupt_session; don't end the session.
+- `session_id` (string, required): ID of the session to use
+- `as_is` (boolean, optional): Send the code exactly as given, in one piece, without reading it as ACL2 code: for a program that reads its own kind of input (default false).
 
 ---
 
@@ -102,9 +103,9 @@ Certify ACL2 books using cert.pl with parallel compilation. This verifies all pr
 
 **Parameters:**
 
-- `file_path` (required): Path to the book WITHOUT .lisp extension. Use an absolute path: a relative one is resolved against the MCP server's working directory, not a session's.
-- `jobs` (optional): Number of parallel jobs for cert.pl. If not specified, automatically detects based on available CPU threads and current load.
-- `timeout` (optional): Timeout in seconds (optional, no timeout if not specified). Unlike evaluate's timeout, this stops cert.pl and the jobs it started; the reply ends with cert.pl's last output.
+- `file_path` (string, required): Path to the book WITHOUT .lisp extension. Use an absolute path: a relative one is resolved against the MCP server's working directory, not a session's.
+- `jobs` (number, optional): Number of parallel jobs for cert.pl. If not specified, automatically detects based on available CPU threads and current load.
+- `timeout` (number, optional): Timeout in seconds (optional, no timeout if not specified). Unlike evaluate's timeout, this stops cert.pl and the jobs it started; the reply ends with cert.pl's last output.
 
 ---
 
@@ -112,24 +113,24 @@ Certify ACL2 books using cert.pl with parallel compilation. This verifies all pr
 
 ### xdoc_search
 
-Search the local xdoc agent corpus (the built manual as one plain-text file per topic plus an index; produced by the acl2-docker project, shipped in the acl2-allcerts image at $ACL2_ROOT/books/doc/agent-corpus or named by the ACL2_XDOC_CORPUS environment variable) for topics matching a query.  Millisecond name/summary search; optional full-text body search.  Needs no ACL2 session.  Follow up with xdoc_show.
+Search the local xdoc agent corpus (every manual topic as plain text; see the acl2-docker project's tools/DESIGN.md) for topics matching a query.  Fast (milliseconds) and works with no ACL2 session.  Searches topic names and one-line summaries by default; set full_text to search topic bodies too.  The corpus is found via the ACL2_XDOC_CORPUS environment variable, or at $ACL2_ROOT/books/doc/agent-corpus (present in the acl2-allcerts Docker image).  Use xdoc_show to read a found topic.
 
 **Parameters:**
 
-- `query` (required): Case-insensitive substring. Examples: 'tail recursion', 'bvplus'
-- `full_text` (optional): Also search topic bodies (slower: ~1 s). Default false.
-- `max_results` (optional): Maximum results (default 20).
+- `query` (string, required): Case-insensitive substring to search for. Examples: 'tail recursion', 'bvplus', 'measure'
+- `full_text` (boolean, optional): Also search topic bodies, not just names and summaries (slower: ~1 s). Default false.
+- `max_results` (number, optional): Maximum results to return (default 20).
 
 ---
 
 ### xdoc_show
 
-Show one topic from the local xdoc agent corpus by natural name ('bvplus', 'fty::defbitstruct', 'acl2::defun') or xdoc key ('ACL2____BVPLUS'); a key with the wrong package is matched by its name part.  Covers every topic in the built manual, but NOT topics defined in the current session (use :doc via evaluate for those).  Needs no ACL2 session.
+Show a topic from the local xdoc agent corpus by name.  Accepts a natural name ('bvplus', 'fty::defbitstruct', 'acl2::defun') or an xdoc key ('ACL2____BVPLUS'); a key with the wrong package is matched by its name part.  Fast and needs no ACL2 session; covers every topic in the built manual, but NOT topics defined in your own session (use :doc via evaluate for those).  Corpus location: see xdoc_search.
 
 **Parameters:**
 
-- `name` (required): Topic to show.
-- `max_chars` (optional): Truncation limit for very large topics (default 20000).
+- `name` (string, required): Topic to show. Examples: 'bvplus', 'fty::defbitstruct', 'ACL2____DEFTHM-STP'
+- `max_chars` (number, optional): Truncate the topic body beyond this many characters (default 20000; some topics, e.g. release notes, are very large).
 
 ---
 

@@ -111,6 +111,8 @@ Test organization:
 - **[tests/test_reader_vs_acl2.py](tests/test_reader_vs_acl2.py)**: Compares the reader
   with ACL2's own reader (runs `acl2` in batch), on snippets and on
   `books/kestrel/acl2pl/reader-tests.lisp` and `*.tests` when present
+- **[tests/test_tool_doc.py](tests/test_tool_doc.py)**: Checks that `tool-doc.md`
+  is up to date with the tool definitions
 
 All tests use `pytest-asyncio` for async testing.
 
@@ -133,6 +135,10 @@ When adding/modifying tools:
    - Check session exists: `session_manager.get_session(session_id)`
    - Send command: `await session.send_command(code, timeout)`
    - Session lock already handled by `send_command()`
+
+4. Regenerate `tool-doc.md` from the definitions: `python scripts/gen_tool_doc.py`
+   (a new tool goes in a section of its `CATEGORIES` first; a test fails
+   while `tool-doc.md` is out of date)
 
 ## Key Constraints
 
