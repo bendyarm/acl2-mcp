@@ -26,11 +26,10 @@ NOTE: sessions live inside the server process.  Keep one MCP instance (and
 thus one server process) alive for the whole interaction; a new instance
 starts a fresh server with no sessions.
 
-NOTE: call() waits up to 600 seconds for a reply (its timeout argument).
-Give evaluate a timeout below that (at most 300 seconds): when the client
-stops waiting, ACL2 keeps working, and its reply is lost.  After an
-evaluate timeout, ACL2 also keeps working; the next evaluate waits for it,
-and interrupt_session stops it.
+NOTE: call() waits up to 600 seconds for a reply (its timeout argument),
+and evaluate waits at most 300 (its default and maximum timeout), so an
+evaluate reply comes in time.  After an evaluate timeout, ACL2 keeps
+working; the next evaluate waits for it, and interrupt_session stops it.
 
 Run this file directly for a self-test (requires acl2 on PATH):
     python3 mcp_stdio_client.py [server-command args...]

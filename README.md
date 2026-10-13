@@ -417,9 +417,11 @@ Every tool that runs ACL2 code runs it in a persistent session:
 For a throwaway experiment in a clean ACL2 world, start a second session
 and end it when you are done.
 
-There is no default timeout: without one, a command waits until ACL2
-returns to its prompt.  A `timeout` (1 to 300 seconds) stops the wait,
-not ACL2; use `interrupt_session` to stop ACL2.
+An `evaluate` call waits at most 300 seconds for ACL2 to finish, or
+less with a `timeout` (1 to 300 seconds).  A timeout stops the wait, not
+ACL2: ACL2 keeps working, and the next command waits for it; use
+`interrupt_session` to stop ACL2.  `certify_book` has no timeout unless
+one is given.
 
 ## Registering the MCP with Codex
 

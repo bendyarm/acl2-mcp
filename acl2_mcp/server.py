@@ -34,6 +34,9 @@ from acl2_mcp.config import ServerConfig, ToolOutputConfig, load_config
 # Security constants
 MAX_TIMEOUT = 300  # 5 minutes maximum
 MIN_TIMEOUT = 1
+# How long evaluate waits when no timeout is given: then a runaway command
+# leaves the agent able to look at the log, wait more, or interrupt
+EVALUATE_DEFAULT_TIMEOUT = MAX_TIMEOUT
 MAX_CODE_LENGTH = 1_000_000  # 1MB of code
 SESSION_INACTIVITY_TIMEOUT = None  # Disabled by default - sessions don't auto-timeout
 MAX_SESSIONS = 50  # Maximum concurrent sessions
@@ -2415,7 +2418,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "timeout": {
                         "type": "number",
-                        "description": "Seconds to wait for the whole command (no limit if not given). On a timeout ACL2 is not interrupted: it keeps working (the rest of a command not yet fully sent is still sent), and the next evaluate waits for it to finish and shows its output first. Check the session log, then wait or call interrupt_session; don't end the session.",
+                        "description": f"Seconds to wait for the whole command (default {EVALUATE_DEFAULT_TIMEOUT}, the most allowed). A timeout costs nothing: ACL2 is not interrupted, but keeps working (the rest of a command not yet fully sent is still sent), and the next evaluate waits for it to finish and shows its output first. So prefer a short timeout, such as 30: a runaway proof usually shows in the session log within 30 seconds. Give more only to a command known to take long, such as a hard proof or a lift. On a timeout, check the session log, then wait or call interrupt_session; don't end the session.",
                     },
                     "session_id": {
                         "type": "string",
@@ -2888,7 +2891,7 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
 
     elif name == "evaluate":
         code = arguments["code"]
-        timeout = arguments.get("timeout")
+        timeout = arguments.get("timeout", EVALUATE_DEFAULT_TIMEOUT)
         session_id = arguments["session_id"]
         as_is = arguments.get("as_is", False) is True
 

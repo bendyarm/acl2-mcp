@@ -89,7 +89,7 @@ Send code to an ACL2 session as if typed at its prompt: events (defun, defthm, i
 **Parameters:**
 
 - `code` (string, required): ACL2 code to evaluate
-- `timeout` (number, optional): Seconds to wait for the whole command (no limit if not given). On a timeout ACL2 is not interrupted: it keeps working (the rest of a command not yet fully sent is still sent), and the next evaluate waits for it to finish and shows its output first. Check the session log, then wait or call interrupt_session; don't end the session.
+- `timeout` (number, optional): Seconds to wait for the whole command (default 300, the most allowed). A timeout costs nothing: ACL2 is not interrupted, but keeps working (the rest of a command not yet fully sent is still sent), and the next evaluate waits for it to finish and shows its output first. So prefer a short timeout, such as 30: a runaway proof usually shows in the session log within 30 seconds. Give more only to a command known to take long, such as a hard proof or a lift. On a timeout, check the session log, then wait or call interrupt_session; don't end the session.
 - `session_id` (string, required): ID of the session to use
 - `as_is` (boolean, optional): Send the code exactly as given, in one piece, without reading it as ACL2 code: for a program that reads its own kind of input (default false).
 
@@ -143,9 +143,9 @@ Show a topic from the local xdoc agent corpus by name.  Accepts a natural name (
 - Sessions are isolated from each other
 
 ### Timeouts
-- `evaluate` timeouts are clamped to the range 1-300 seconds (5 minutes max); `certify_book` timeouts are not
-- If no timeout is specified, operations run until completion (no timeout)
-- An `evaluate` timeout only stops waiting: ACL2 keeps working, and `interrupt_session` stops it.  A `certify_book` timeout, or cancelling the call, stops cert.pl and the jobs it started.
+- `evaluate` timeouts are clamped to the range 1-300 seconds (5 minutes max), and default to 300
+- `certify_book` timeouts are not clamped, and there is none unless one is given
+- An `evaluate` timeout only stops waiting: ACL2 keeps working, the next `evaluate` waits for it, and `interrupt_session` stops it.  Cancelling an `evaluate` call interrupts ACL2.  A `certify_book` timeout, or cancelling the call, stops cert.pl and the jobs it started.
 
 ### Security Constraints
 - **Maximum code length**: 1MB (1,000,000 characters) per request

@@ -111,6 +111,8 @@ independent.  To try something on top of your current world instead, set a
 - ACL2 has exited: a reply says "ACL2 has exited in this session" (a timeout or a failed event is no reason to end a session)
 - You're done with a scratch session (see Scratch Sessions above)
 
+**Choosing a timeout**: Pass a short `timeout`, such as 30, unless the command is known to take long (a hard proof, a lift): a runaway usually shows within 30 seconds, and a timeout loses nothing.
+
 **On timeout**: ACL2 keeps working on the command; check the session log (`tail -20 <log-file>`) to see how it is doing. The next `mcp__acl2__evaluate` waits for it to finish (within its own timeout) and shows its output first. To stop it instead, call `mcp__acl2__interrupt_session`.
 
 ## Monitoring Long-Running Operations

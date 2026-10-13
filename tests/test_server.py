@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+from acl2_mcp import server
 from acl2_mcp.server import call_tool, list_tools, xdoc_corpus_show
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "for-agents"))
@@ -66,6 +67,26 @@ async def test_call_tool_evaluate_with_definition(session_id: str) -> None:
     assert len(result) == 1
     assert result[0].type == "text"
     assert "16" in result[0].text
+
+
+@pytest.mark.asyncio
+async def test_evaluate_default_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """evaluate waits at most 300 seconds when no timeout is given, so that
+    an agent gets control back from a runaway command (it used to wait as
+    long as ACL2 took, leaving only the user to interrupt it)."""
+    timeouts: list[Any] = []
+
+    class Session:
+        async def send_command(self, code: str, timeout: Any = None,
+                               as_is: bool = False) -> str:
+            timeouts.append(timeout)
+            return ""
+
+    monkeypatch.setattr(server.session_manager, "get_session",
+                        lambda session_id: Session())
+    await call_tool("evaluate", {"session_id": "s", "code": "(+ 1 2)"})
+    await call_tool("evaluate", {"session_id": "s", "code": "(+ 1 2)", "timeout": 20})
+    assert timeouts == [300, 20]
 
 
 @pytest.mark.asyncio
