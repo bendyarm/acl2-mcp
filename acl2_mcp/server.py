@@ -303,6 +303,12 @@ def _session_not_found(session_id: str) -> str:
             f"the active sessions)")
 
 
+# What ACL2 prints when it gives up reading a form, as for a symbol in a
+# package that doesn't exist (the host Lisp's reader error), or #! naming
+# one (ACL2's reader); see ACL2Session._watch_form
+READ_ABORT_MARKERS = (b"ABORTING from raw Lisp", b"HARD ACL2 ERROR in ACL2-READER")
+
+
 # What the next reply says before the output of a command whose evaluate
 # call timed out, or was cancelled (see ACL2Session._take_unreported_output)
 TIMED_OUT_HEADING = "Output of the earlier command that timed out:"
@@ -351,6 +357,14 @@ class ACL2Session:
     _unreported_heading: str = ""
     # The host Lisp's reader syntax (see start_session)
     syntax: reader.Syntax = reader.SBCL
+    # Whether the command being sent is sent one form at a time (see
+    # _plan_units), and the state of the form being sent (see _watch_form)
+    _units_are_forms: bool = False
+    _form_watched: bool = False
+    _form_writing: bool = False
+    _form_cut: bool = False
+    _form_output: bytearray = field(default_factory=bytearray, repr=False)
+    _forms_cut: int = 0  # forms of the command cut short (see _watch_form)
     # The characters that ACL2's terminal turns into signals, and what
     # each would do (see _signal_character)
     signal_characters: dict[bytes, str] = field(default_factory=lambda: {
@@ -482,7 +496,7 @@ class ACL2Session:
 
                 data = f"{command}\n".encode()
                 refusal = self._signal_character(data)
-                plan = ([len(data)] if as_is or refusal
+                plan = (([len(data)], False) if as_is or refusal
                         else self._plan_units(data))
 
                 # Capture the output sequence counter BEFORE adding anything
@@ -506,8 +520,9 @@ class ACL2Session:
                 # Timestamp after input (preserve original format)
                 seq_id = await self._get_next_sequence_id()
                 current_time = time.strftime("%Y-%m-%d %H:%M:%S")
-                if refusal or isinstance(plan, str) or not plan:
-                    reason = refusal or plan or "only comments and whitespace"
+                if refusal or isinstance(plan, str) or not plan[0]:
+                    reason = (refusal or (plan if isinstance(plan, str) else "")
+                              or "only comments and whitespace")
                     await self.merge_queue.put((
                         timestamp_mono, seq_id, "stdin",
                         f"[{current_time} NOT SENT: {reason}]\n"))
@@ -516,7 +531,7 @@ class ACL2Session:
                                 f"{refusal}.  (To interrupt ACL2, call "
                                 f"interrupt_session.  In ACL2 code, "
                                 f"(code-char N) is the character with code N.)")
-                    if not plan:
+                    if not isinstance(plan, str):
                         return (earlier + "Nothing to evaluate: the code has "
                                 "only comments and whitespace.")
                     return (earlier + f"Error: Nothing was sent, because "
@@ -525,7 +540,8 @@ class ACL2Session:
                             f"of input, send it with as_is.)")
                 timestamp_line = f"[{current_time} INPUT]\n"
                 await self.merge_queue.put((timestamp_mono, seq_id, "stdin", timestamp_line))
-                cuts = plan
+                cuts, self._units_are_forms = plan
+                self._forms_cut = 0
 
                 # Send the command to ACL2 via the PTY master, one form at a
                 # time (see _send_units)
@@ -561,9 +577,17 @@ class ACL2Session:
                             f"output first; to stop it instead, call "
                             f"interrupt_session.{log_hint}")
                 note = ""
+                if self._forms_cut:
+                    note = (f"Note: ACL2 stopped reading {self._forms_cut} "
+                            f"form{'s' if self._forms_cut > 1 else ''} partway "
+                            f"(see the error below, such as a package that "
+                            f"doesn't exist), so the part it hadn't read was "
+                            f"discarded rather than read as new commands.  "
+                            f"(Errors just after that one come from the part "
+                            f"it had read.)\n")
                 if outcome == "interrupted":
                     await self._log_input_cut_short(sent, len(data))
-                    note = (f"Note: interrupted before the whole command was "
+                    note += (f"Note: interrupted before the whole command was "
                             f"sent ({sent} of {len(data)} bytes); the rest "
                             f"was discarded.\n")
 
@@ -691,10 +715,11 @@ class ACL2Session:
                 f"terminal would turn into a signal that would "
                 f"{self.signal_characters[char]}")
 
-    def _plan_units(self, data: bytes) -> list[int] | str:
+    def _plan_units(self, data: bytes) -> tuple[list[int], bool] | str:
         """Where to split DATA, a command ending with a newline, into units
-        sent one at a time: a list of the units' ends (offsets in DATA),
-        or why ACL2 couldn't read it.
+        sent one at a time: a list of the units' ends (offsets in DATA) and
+        whether each unit is a form (or keyword command), or why ACL2
+        couldn't read it.
 
         A unit is a top-level form with the text before it, except that a
         keyword command such as ":pe foo" takes the rest of its line:
@@ -705,7 +730,7 @@ class ACL2Session:
         handle (or a top-level feature conditional, whose form may be
         skipped) leaves the forms uncertain.
         """
-        whole = [len(data)]
+        whole = ([len(data)], False)
         mode = prompt_mode(self.last_prompt_text)
         if mode == "lisp":
             return whole
@@ -734,7 +759,7 @@ class ACL2Session:
             k += 1
         if cuts:
             cuts[-1] = len(data)
-        return cuts
+        return cuts, True
 
     async def _send_units(self, data: bytes, cuts: list[int], unit: int,
                           written: int, mark: int, deadline: Optional[float],
@@ -764,8 +789,22 @@ class ACL2Session:
                 # No prompt seen from now on can be an earlier unit's
                 self._sends += 1
                 mark = self.candidate_seq
-            written, outcome = await self._write_input(
-                memoryview(text), written, deadline, interrupts)
+                self._form_watched = self._units_are_forms
+                self._form_cut = False
+                self._form_output.clear()
+            self._form_writing = True
+            try:
+                written, outcome = await self._write_input(
+                    memoryview(text), written, deadline, interrupts)
+            finally:
+                self._form_writing = False
+            if outcome == "cut":
+                # ACL2 gave up reading the form (see _watch_form): go on
+                # with the next one, as ACL2 would read it if typed
+                self._forms_cut += 1
+                await self._log_input_cut_short(written, len(text))
+                unit, written = unit + 1, 0
+                continue
             if outcome != "done":
                 return unit, written, mark, outcome
             unit, written = unit + 1, 0
@@ -894,12 +933,15 @@ class ACL2Session:
         Returns the number of bytes of DATA written so far and why writing
         stopped: "done"; "timeout" (DEADLINE passed); "interrupted"
         (interrupt() was called since INTERRUPTS was read from
-        interrupt_count; the rest must not follow it); or "closed".
+        interrupt_count; the rest must not follow it); "cut" (ACL2 gave up
+        reading the form; see _watch_form); or "closed".
         """
         delay = 0.001
         while written < len(data):
             if self.interrupt_count != interrupts:
                 return written, "interrupted"
+            if self._form_cut:
+                return written, "cut"
             fd = self.master_fd
             if fd is None:
                 return written, "closed"
@@ -1046,6 +1088,29 @@ class ACL2Session:
             self.sequence_counter += 1
             return seq_id
 
+    def _watch_form(self, chunk: bytes) -> None:
+        """Watch ACL2's output CHUNK while a form is being sent, and until
+        its prompt: if ACL2 gives up reading the form (READ_ABORT_MARKERS),
+        as for a symbol in a package that doesn't exist, discard the input
+        it hasn't read yet, and stop writing the rest of the form.
+
+        ACL2 discards only what it has read, so the rest of a large form
+        (still in the terminal's input queue, or not yet written) would be
+        read as new commands: thousands of errors for a large defun, and
+        prompts that put later replies out of step.  The discarding is done
+        here, as soon as the message starts, so that ACL2 hasn't read more
+        by then.  Runs in the reader callback; only for a command sent one
+        form at a time, so that this unread input is the form's.
+        """
+        self._form_output += chunk
+        if any(marker in self._form_output for marker in READ_ABORT_MARKERS):
+            self._form_watched = False
+            self._flush_pty_input()
+            if self._form_writing:
+                self._form_cut = True
+        elif len(self._form_output) > 4096:
+            del self._form_output[:-64]  # (a marker may straddle chunks)
+
     def _on_pty_readable(self) -> None:
         """
         Synchronous callback invoked by event loop when PTY master has data.
@@ -1079,6 +1144,9 @@ class ACL2Session:
                         # Trim from the beginning to maintain size limit
                         excess = len(self.ring_buffer) - self.max_ring_buffer_size
                         self.ring_buffer = self.ring_buffer[excess:]
+
+                    if self._form_watched:
+                        self._watch_form(chunk)
 
                     # Schedule async processing of the chunk
                     asyncio.ensure_future(self._process_pty_chunk(chunk))

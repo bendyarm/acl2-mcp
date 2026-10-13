@@ -218,8 +218,26 @@ for the next reply.
   unit as ACL2 reads, waiting on EAGAIN (backing off from 1 ms to 50 ms)
   and yielding to the event loop so the reader keeps draining output.
 
-Sending stops early in three cases:
+Sending stops early in four cases:
 
+- **ACL2 gives up reading a form** (`_watch_form`), as for a symbol in a
+  package that doesn't exist (the host Lisp's reader error, which ACL2
+  reports as `ABORTING from raw Lisp`) or `#!` naming one (`HARD ACL2
+  ERROR in ACL2-READER`).  The reader can't check package names, which
+  depend on ACL2's world.  ACL2 discards only what it has read, so the
+  rest of a large form (in the input queue, or not yet written) used to
+  be read as new commands: thousands of errors and prompts for a large
+  `defun`, which put later replies out of step.  So while a form is sent
+  one at a time, the reader callback watches ACL2's output from the
+  start of the form; when one of those messages appears, it discards
+  ACL2's unread input at once (before ACL2 has printed its prompt and
+  read again), and the form's writing stops with an `INPUT CUT SHORT`
+  marker.  The reply says so, and the command's later forms are still
+  sent.  CCL, unlike SBCL, keeps what it had buffered of the form, so
+  its reply can show a further reader error or two from that part.  The
+  callback watches for those messages, not for any output: the next form
+  can be sent at a false prompt candidate while the form before it is
+  still printing.
 - **Timeout**: the command's timeout covers waiting for an earlier
   command, sending, and evaluation.  On a timeout ACL2 keeps working:
   a background task (`_pending_send`, `_finish_command`) sends the rest

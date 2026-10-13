@@ -840,6 +840,29 @@ async def test_command_after_a_timeout_waits_for_it(session_id: str) -> None:
     assert "earlier command" not in text
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prefix, symbol", [("", "nopkg::g"), ("#!nopkg ", "g")])
+async def test_large_form_with_missing_package(
+        session_id: str, prefix: str, symbol: str) -> None:
+    """When ACL2 gives up reading a large form, as for a symbol in a
+    package that doesn't exist, the part it hasn't read is discarded, not
+    read as new commands, and later replies stay in step.
+
+    ACL2 discards only what it has read.  The rest of an 80 KB defun used
+    to come back as thousands of errors and prompts, which left later
+    replies without their own results.
+    """
+    big = (f"{prefix}(defun h (x)\n  (list ({symbol} x)\n"
+           + "".join(f"        (car (cons {i} x))\n" for i in range(3000))
+           + "))")
+    text = await evaluate(session_id, big)
+    assert "NOPKG" in text and "stopped reading 1 form" in text
+    assert len(text) < 10000
+    for k in range(2):
+        text = await evaluate(session_id, f"(value-triple :next-{k})")
+        assert f":NEXT-{k}" in text and "Error" not in text
+
+
 async def cancel_after(session_id: str, code: str, delay: float) -> None:
     """Start evaluating CODE, and cancel the call after DELAY seconds, as a
     client does when the user interrupts the agent."""
