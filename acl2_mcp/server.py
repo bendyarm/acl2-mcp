@@ -1679,11 +1679,12 @@ def show_session_log(
             window_title = _session_window_title(session_id)
             # Bring this session's window to the front if there is one
             # still running something (its shell may not have started
-            # tail yet); otherwise open one
+            # tail yet); otherwise open one.  (Over windows by id: see
+            # _stop_terminal_wrapper.)
             script = (
                 'tell application "Terminal"\n'
-                '    repeat with w in windows\n'
-                '        repeat with t in tabs of w\n'
+                '    repeat with w in (get every window)\n'
+                '        repeat with t in (get every tab of w)\n'
                 '            try\n'
                 f'                if custom title of t is "{window_title}" and (count of processes of t) > 0 then\n'
                 '                    set frontmost of w to true\n'
@@ -1835,9 +1836,12 @@ def _stop_terminal_wrapper(pid: int, window_title: str) -> None:
         # below.  Not whatever runs on the tty then: once they have
         # exited, Terminal gives the tty to the next window it opens.
         processes = ",".join(_run(["ps", "-t", tty, "-o", "pid="]).split())
+        # Over (get every window), a list of windows by id: "repeat with w
+        # in windows" names them by position, which shifts when another
+        # window closes meanwhile, so "id of w" could be another window's
         window = _run(["osascript", "-e", (
             'tell application "Terminal"\n'
-            '    repeat with w in windows\n'
+            '    repeat with w in (get every window)\n'
             '        try\n'
             '            if (count of tabs of w) is 1 then\n'
             f'                if tty of tab 1 of w is "/dev/{tty}" and custom title of tab 1 of w is "{window_title}" then return id of w\n'
