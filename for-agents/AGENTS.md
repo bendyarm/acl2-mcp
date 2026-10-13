@@ -386,12 +386,13 @@ This skill starts a persistent ACL2 session using the Model Context Protocol (MC
 1. **Check MCP ACL2 server availability**:
    - Attempt to use `mcp__acl2__list_sessions` to verify the MCP ACL2 server is available
    - **If the tool is not available or returns an error**:
-     - Report: "Sorry, the MCP ACL2 server is not available. The MCP server must be configured properly."
+     - If your tool harness can't register MCP servers (a cloud sandbox, say), drive the server directly over stdio with `for-agents/mcp_stdio_client.py` from the acl2-mcp repository: the same tools are available through its `call` method, and the rest of this guidance applies with that substitution.
+     - Otherwise report: "Sorry, the MCP ACL2 server is not available. The MCP server must be configured properly."
      - **STOP** - do not continue with the remaining steps in this skill or any subsequent steps in any calling skill
    - **If successful**, proceed to step 2
 
 2. **Determine working directory for ACL2**:
-   - The `mcp__acl2__start_session` tool now accepts an optional `cwd` parameter
+   - `mcp__acl2__start_session` takes an optional `cwd` parameter
    - **If the user has specified a working directory** (e.g., for x86 lifting work in a specific examples directory):
      - Use that directory as the `cwd` parameter when starting the session
    - **Otherwise**:
@@ -401,11 +402,11 @@ This skill starts a persistent ACL2 session using the Model Context Protocol (MC
 3. **Check for existing sessions**:
    - Use `mcp__acl2__list_sessions` to see if there are already active sessions
    - **If one existing session**:
-     - Use AskUserQuestion to ask if they want to use the existing session
+     - Ask the user whether to use the existing session
      - If yes, use that session_id (skip to step 6)
      - If no, proceed to start a new session (step 4)
    - **If multiple existing sessions**:
-     - Use AskUserQuestion to ask which session to use, or if they want to start a new one
+     - Ask the user which session to use, or whether to start a new one
      - Show session names, IDs, and their ages and idle times to help the user decide
      - If they choose an existing session, use that session_id (skip to step 6)
      - If they choose to start new, proceed to step 4
@@ -472,13 +473,13 @@ independent.  To try something on top of your current world instead, set a
 **After sending an interrupt**, read its reply, which shows ACL2's response:
 - "ACL2 is back at its prompt": the session is fine; continue working.
 - "has not returned to its prompt": in a proof, the first interrupt only asks ACL2 to stop at its next check, so call `mcp__acl2__interrupt_session` again. Otherwise, check the session log to see what ACL2 is doing.
-- **NEVER** use `:good-bye`, `:q`, or `(quit)` to "check" status - these will exit ACL2!
+- **NEVER** use `(good-bye)`, `(exit)`, or `(quit)`, or their keyword forms `:good-bye`, `:exit`, and `:quit`, to "check" status: they exit ACL2, ending the session and its world.  `:q` leaves the ACL2 loop for raw Lisp (`(lp)` gets back).
 - If ACL2 still doesn't get back to its prompt, you may need to end the session and start fresh
 
 **When ending a session is appropriate** (rare):
 - You're completely done with ACL2 work
 - You need to start fresh with a clean ACL2 state
-- The session process has actually crashed (not just timed out)
+- ACL2 has exited: a reply says "ACL2 has exited in this session" (a timeout or a failed event is no reason to end a session)
 - You're done with a scratch session (see Scratch Sessions above)
 
 **On timeout**: ACL2 keeps working on the command; check the session log (`tail -20 <log-file>`) to see how it is doing. The next `mcp__acl2__evaluate` waits for it to finish (within its own timeout) and shows its output first. To stop it instead, call `mcp__acl2__interrupt_session`.

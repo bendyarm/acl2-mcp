@@ -21,7 +21,7 @@ This skill starts a persistent ACL2 session using the Model Context Protocol (MC
    - **If successful**, proceed to step 2
 
 2. **Determine working directory for ACL2**:
-   - The `mcp__acl2__start_session` tool now accepts an optional `cwd` parameter
+   - `mcp__acl2__start_session` takes an optional `cwd` parameter
    - **If the user has specified a working directory** (e.g., for x86 lifting work in a specific examples directory):
      - Use that directory as the `cwd` parameter when starting the session
    - **Otherwise**:
@@ -102,13 +102,13 @@ independent.  To try something on top of your current world instead, set a
 **After sending an interrupt**, read its reply, which shows ACL2's response:
 - "ACL2 is back at its prompt": the session is fine; continue working.
 - "has not returned to its prompt": in a proof, the first interrupt only asks ACL2 to stop at its next check, so call `mcp__acl2__interrupt_session` again. Otherwise, check the session log to see what ACL2 is doing.
-- **NEVER** use `:good-bye`, `:q`, or `(quit)` to "check" status - these will exit ACL2!
+- **NEVER** use `(good-bye)`, `(exit)`, or `(quit)`, or their keyword forms `:good-bye`, `:exit`, and `:quit`, to "check" status: they exit ACL2, ending the session and its world.  `:q` leaves the ACL2 loop for raw Lisp (`(lp)` gets back).
 - If ACL2 still doesn't get back to its prompt, you may need to end the session and start fresh
 
 **When ending a session is appropriate** (rare):
 - You're completely done with ACL2 work
 - You need to start fresh with a clean ACL2 state
-- The session process has actually crashed (not just timed out)
+- ACL2 has exited: a reply says "ACL2 has exited in this session" (a timeout or a failed event is no reason to end a session)
 - You're done with a scratch session (see Scratch Sessions above)
 
 **On timeout**: ACL2 keeps working on the command; check the session log (`tail -20 <log-file>`) to see how it is doing. The next `mcp__acl2__evaluate` waits for it to finish (within its own timeout) and shows its output first. To stop it instead, call `mcp__acl2__interrupt_session`.

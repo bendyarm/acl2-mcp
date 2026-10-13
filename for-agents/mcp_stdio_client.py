@@ -11,7 +11,7 @@ Typical use from an agent's own Python code:
     from mcp_stdio_client import MCP
     # Server on this machine:
     m = MCP(["acl2-mcp"])
-    # Or server inside a Docker container (e.g. the acl2-kcerts image):
+    # Or server inside a Docker container (one of the acl2-docker images):
     m = MCP(["docker", "exec", "-i", "acl2dev", "/root/.venvs/mcp/bin/acl2-mcp"])
 
     m.initialize()
@@ -25,6 +25,12 @@ Typical use from an agent's own Python code:
 NOTE: sessions live inside the server process.  Keep one MCP instance (and
 thus one server process) alive for the whole interaction; a new instance
 starts a fresh server with no sessions.
+
+NOTE: call() waits up to 600 seconds for a reply (its timeout argument).
+Give evaluate a timeout below that (at most 300 seconds): when the client
+stops waiting, ACL2 keeps working, and its reply is lost.  After an
+evaluate timeout, ACL2 also keeps working; the next evaluate waits for it,
+and interrupt_session stops it.
 
 Run this file directly for a self-test (requires acl2 on PATH):
     python3 mcp_stdio_client.py [server-command args...]
