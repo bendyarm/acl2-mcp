@@ -1,3 +1,97 @@
+# Changes — 2026-10-13
+
+## Summary
+
+- Nine tools instead of 21.  Tools that were broken or misleading
+  (`check_theorem`, `retry_proof`, the checkpoint tools, `admit`,
+  `check_syntax`, `verify_guards`) and thin wrappers around `evaluate`
+  are gone, and so is one-off execution: all ACL2 code runs through
+  `evaluate` in a session, so every tool that runs ACL2 code takes a
+  `session_id`.  For undoing and checkpoints, the
+  `acl2-session-history-management` skill shows how to use `deflabel`
+  and `:ubu` through `evaluate`.
+
+- New `xdoc_search` and `xdoc_show` tools look up the ACL2 manual in a
+  local xdoc corpus, offline and in milliseconds, with no ACL2 session.
+
+- `evaluate` works reliably for any command:
+  - A command is sent one top-level form at a time, so its reply ends
+    at its own prompt, not at an earlier form's.
+  - Code that ACL2 can't read (such as a form missing its `)`) is
+    rejected before anything is sent.  A new ACL2 reader in Python
+    (`acl2_mcp/reader.py`) does this; it has been checked against ACL2's
+    own reader on SBCL and CCL, and on 389,000 forms from the books.
+  - Lines of any length work, and line-editing characters (DEL, C-u,
+    C-w, C-d, ...) reach ACL2 unchanged.  Code with a C-c, C-\ or C-z,
+    which the terminal would turn into a signal, is refused.
+  - A new `as_is` parameter sends the code exactly as given, for a
+    program with its own read loop.
+  - A timeout no longer loses anything: ACL2 keeps working, and the
+    next `evaluate` waits for it and shows its output first.  The
+    default timeout is 300 seconds (the maximum), and agents are advised
+    to use a short one, such as 30.
+  - A cancelled call (the user interrupted the agent) interrupts ACL2.
+  - A large form with a symbol in a package that doesn't exist no
+    longer comes back as thousands of errors.
+  - Replies end correctly at the prompts of the proof builder, ACL2's
+    queries, walkabout, raw Lisp, and SBCL's and CCL's debuggers and
+    inspectors; on a timeout, an unknown prompt is taken as the one
+    ACL2 is waiting at.
+
+- `interrupt_session` works even when ACL2 has unread input queued (it
+  used to do nothing on Linux), waits for ACL2's prompt, and returns
+  ACL2's abort message; it says when a proof needs a second interrupt.
+
+- `certify_book`: a timeout, a cancelled call, or the server exiting
+  stops `cert.pl` and every job it started.  A book that doesn't exist
+  is reported as such.
+
+- Error messages say what happened and what to do: for example, when
+  ACL2 has exited in a session, every call says so and says to start a
+  new session, and `list_sessions` marks the session.
+
+- Session log viewers:
+  - A new Emacs viewer shows the log in an Emacs buffer, for working
+    on a remote machine over ssh in tmux (see
+    `INSTALL.remote-tmux-emacs.md`).
+  - Viewers close whenever a session ends: by `end_session`, by ACL2
+    exiting, or by the server exiting (also on SIGHUP, as when a tmux
+    pane or terminal window is closed).
+  - The macOS Terminal viewer closes its window without a "terminate
+    running processes?" dialog, and never types into or closes another
+    window.
+  - On a Linux desktop, the viewer window closes when the session ends,
+    and none is opened without a display.
+
+- For agents:
+  - `for-agents/mcp_stdio_client.py` drives the server directly over
+    stdio, for an agent that can't register MCP servers (a cloud
+    sandbox, say).
+  - The skills and `for-agents/AGENTS.md` say how to choose a timeout,
+    what to do after a timeout or an interrupt, and when (rarely) to
+    end a session; the documentation lookup skill prefers the local
+    xdoc corpus.
+  - Instructions for registering the server with Codex, and security
+    tips for Claude Code and Codex (`README-CLAUDE-CODE-SECURITY-TIPS.md`,
+    `README-CODEX-SECURITY-TIPS.md`).
+
+## Configuration
+
+- **`session_log.viewer`** (`"auto"`, `"emacs"`, `"terminal"` or
+  `"none"`, default `"auto"`): how session logs are shown.  `"auto"`
+  and `"terminal"` open a terminal window (Terminal on macOS);
+  `"emacs"` shows the log in Emacs via `emacsclient`.
+
+## Development
+
+- `tool-doc.md` is generated from the tool definitions by
+  `scripts/gen_tool_doc.py`, and a test fails when it is out of date.
+- `mypy --strict` reports no errors, and the test suite passes with no
+  known failures (on macOS with SBCL and CCL, and on Linux with SBCL).
+- `docs/architecture.md` describes the terminal settings, sending one
+  form at a time, prompt detection, interrupts and cancelled calls, and
+  the log viewers.
+
 # Changes — 2026-05-24
 
 - Improved the organization of the README.md installation instructions,
