@@ -226,6 +226,32 @@ def test_sighup_ends_sessions_and_certifications(
             mcp.p.kill()
 
 
+def test_non_number_timeout_rejected() -> None:
+    """The MCP layer checks a tool call's arguments against the tool's
+    schema before the server's code sees them: a timeout that isn't a
+    number, such as the string "60" or true, is rejected with a message
+    saying so, and a number gets through."""
+    mcp = MCP([sys.executable, "-m", "acl2_mcp.server"])
+    try:
+        mcp.initialize()
+
+        def call(timeout: Any) -> tuple[bool, str]:
+            reply = mcp.request("tools/call", {"name": "evaluate", "arguments": {
+                "session_id": "no-such-session", "code": "(+ 1 2)",
+                "timeout": timeout}})
+            result = reply["result"]
+            text = " ".join(part.get("text", "") for part in result["content"])
+            return bool(result.get("isError")), text
+
+        for timeout in ["60", True]:
+            is_error, text = call(timeout)
+            assert is_error and "is not of type 'number'" in text
+        is_error, text = call(60)
+        assert "Session no-such-session not found" in text
+    finally:
+        mcp.close()
+
+
 @pytest.fixture
 def tiny_corpus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A five-topic xdoc corpus laid out like the real one."""

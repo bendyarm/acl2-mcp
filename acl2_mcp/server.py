@@ -1092,7 +1092,7 @@ class ACL2Session:
                 # Process complete lines and detect partial prompts, preserving
                 # incomplete bytes across chunks via partial_line_buffer.
                 if self.partial_line_buffer:
-                    buffer = self.partial_line_buffer + chunk
+                    buffer = bytes(self.partial_line_buffer) + chunk
                     self.partial_line_buffer.clear()
                 else:
                     buffer = chunk
@@ -1641,8 +1641,8 @@ def open_log_viewer(
 
         elif system == "Windows":
             # Use PowerShell
-            cmd = f'powershell -Command "Get-Content -Path \'{log_file}\' -Wait -Tail {lines}"'
-            subprocess.Popen(["cmd", "/c", "start", "cmd", "/k", cmd])
+            powershell = f'powershell -Command "Get-Content -Path \'{log_file}\' -Wait -Tail {lines}"'
+            subprocess.Popen(["cmd", "/c", "start", "cmd", "/k", powershell])
 
     except Exception:
         # Silently fail if we can't open the viewer
@@ -1992,7 +1992,7 @@ class SessionManager:
                 pass
 
             # Define preexec_fn to set up controlling terminal properly
-            def setup_controlling_tty():
+            def setup_controlling_tty() -> None:
                 """
                 Make the child process a session leader with the PTY slave as controlling terminal.
                 This is critical for proper signal handling (Ctrl-C) and terminal behavior.
@@ -2216,7 +2216,7 @@ class SessionManager:
                 await asyncio.sleep(60)  # Check every minute
 
                 now = time.time()
-                to_remove = []
+                to_remove: list[tuple[str, ACL2Session]] = []
 
                 # SECURITY: Create snapshot to avoid race conditions
                 sessions_snapshot = list(self.sessions.items())
@@ -2252,7 +2252,7 @@ session_manager = SessionManager(server_config)
 app: Server = Server("acl2-mcp")
 
 
-@app.list_tools()  # type: ignore[misc,no-untyped-call]
+@app.list_tools()  # type: ignore[no-untyped-call]
 async def list_tools() -> list[Tool]:
     """List available ACL2 tools."""
     return [
@@ -2744,7 +2744,7 @@ def xdoc_corpus_show(name: str, max_chars: int) -> str:
             f"look for it, or :doc in a session for session-defined topics.")
 
 
-@app.call_tool()  # type: ignore[misc]
+@app.call_tool()
 async def call_tool(name: str, arguments: Any) -> Sequence[TextContent]:
     """Handle tool calls."""
     if name == "start_session":

@@ -1,8 +1,4 @@
-"""Tests for ACL2 MCP server session functionality.
-
-Pre-existing failure in another test file:
-- test_security.py::test_validate_timeout_handles_invalid_type
-"""
+"""Tests for ACL2 MCP server session functionality."""
 
 import asyncio
 import os

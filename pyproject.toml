@@ -30,6 +30,9 @@ dev = [
     "mypy>=1.0.0",
     "pytest>=7.0.0",
     "pytest-asyncio>=0.23.0",
+    # For mypy, which checks the code as Python 3.10 code (see below)
+    "tomli",
+    "types-aiofiles",
 ]
 
 [tool.mypy]
@@ -38,6 +41,11 @@ strict = true
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
+
+[[tool.mypy.overrides]]
+# The MCP SDK's decorators (app.list_tools(), app.call_tool()) are untyped
+module = "acl2_mcp.server"
+disallow_untyped_decorators = false
 
 [project.scripts]
 acl2-mcp = "acl2_mcp.server:main"

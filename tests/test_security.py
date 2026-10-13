@@ -24,8 +24,10 @@ def test_validate_timeout_handles_float() -> None:
 
 
 def test_validate_timeout_handles_invalid_type() -> None:
-    """Test that invalid types return default."""
-    assert validate_timeout("invalid") == 30  # type: ignore
+    """A timeout that isn't a number means no limit here, as when none is
+    given.  Through MCP, such a value never gets this far: the MCP layer
+    rejects it (see test_server.py's test_non_number_timeout_rejected)."""
+    assert validate_timeout("invalid") is None  # type: ignore
 
 
 def test_xdoc_full_text_query_starting_with_dash(

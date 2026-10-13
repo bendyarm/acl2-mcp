@@ -5,10 +5,10 @@ from pathlib import Path
 import sys
 from typing import Any, TextIO
 
-try:
+if sys.version_info >= (3, 11):
     import tomllib
-except ModuleNotFoundError:  # pragma: no cover - exercised on Python 3.10
-    import tomli as tomllib  # type: ignore[import-not-found,no-redef]
+else:  # pragma: no cover - exercised on Python 3.10
+    import tomli as tomllib
 
 
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "acl2-mcp" / "config.toml"
