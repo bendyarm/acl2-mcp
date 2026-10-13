@@ -282,6 +282,22 @@ message too.  In a proof, the first interrupt only asks ACL2 to stop at
 its next check (`:DOC abort-soft`); when no prompt comes, the reply says
 to interrupt again.
 
+### Cancelled Calls
+
+An MCP client cancels a tool call when, say, the user interrupts the
+agent.  A cancelled `evaluate` call stops its command, as a cancelled
+`certify_book` call stops `cert.pl`: if any of the command may have
+reached ACL2, `send_command` interrupts ACL2 as above
+(`_cancel_command`), which also discards the part of the command ACL2
+hasn't read, half a form included.  The call returns nothing, so the
+next reply begins by saying that the earlier call was cancelled and
+showing ACL2's output (its abort message), and the next command first
+waits for ACL2's prompt after the interrupt, as after a timeout.
+Without this, the rest of the command was dropped silently while ACL2
+went on with the form it had, a half-written form was left for ACL2 to
+read as the start of the next command, and the output turned up
+unlabeled in the next reply.
+
 ## Session Lifecycle
 
 ### Start Session
@@ -302,7 +318,7 @@ to interrupt again.
 ### Send Command
 
 1. Acquire session lock
-2. Wait for an earlier command that timed out to finish
+2. Wait for an earlier command that timed out, or was cancelled, to finish
 3. Split the command into forms, or reject it (unreadable, or with a
    C-c, C-\ or C-z)
 4. Log input with timestamp

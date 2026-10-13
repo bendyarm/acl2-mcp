@@ -840,6 +840,52 @@ async def test_command_after_a_timeout_waits_for_it(session_id: str) -> None:
     assert "earlier command" not in text
 
 
+async def cancel_after(session_id: str, code: str, delay: float) -> None:
+    """Start evaluating CODE, and cancel the call after DELAY seconds, as a
+    client does when the user interrupts the agent."""
+    call = asyncio.create_task(evaluate(session_id, code))
+    await asyncio.sleep(delay)
+    call.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+
+
+@pytest.mark.asyncio
+async def test_cancelled_command_is_stopped(session_id: str) -> None:
+    """Cancelling an evaluate call interrupts ACL2 and discards the part of
+    the command not yet sent, and the next reply says so first.
+
+    The rest of the command used to be dropped silently, while ACL2 went on
+    with the form it had, whose output turned up unlabeled in the next
+    reply.
+    """
+    await cancel_after(
+        session_id, "(value-triple (sleep 4))\n(value-triple :second-form)", 1)
+    start = time.monotonic()
+    text = await evaluate(session_id, "(value-triple :next)")
+    assert time.monotonic() - start < 3  # ACL2 was interrupted
+    assert text.startswith("The earlier command's evaluate call was cancelled")
+    earlier, this = text.split("Output of this command:")
+    assert "ABORTING" in earlier and ":SECOND-FORM" not in text
+    assert ":NEXT" in this
+    text = await evaluate(session_id, "(value-triple :after)")
+    assert ":AFTER" in text and "cancelled" not in text
+
+
+@pytest.mark.asyncio
+async def test_cancel_while_a_form_is_written(session_id: str) -> None:
+    """A call cancelled while a large form is still being written (ACL2 is
+    busy with the form before it) leaves no part of it for ACL2 to read
+    as the start of the next command."""
+    big = '(value-triple (length "' + "x" * 200000 + '"))'
+    await cancel_after(session_id, "(value-triple (sleep 3))\n" + big, 1)
+    text = await evaluate(session_id, "(value-triple :next)")
+    assert ":NEXT" in text.split("Output of this command:")[1]
+    assert "200000" not in text
+    text = await evaluate(session_id, "(+ 1000 337)")
+    assert "1337" in text and "cancelled" not in text
+
+
 @pytest.mark.asyncio
 async def test_unreadable_code_is_not_sent(session_id: str) -> None:
     """Code that ACL2 can't read is rejected, and none of it is sent:

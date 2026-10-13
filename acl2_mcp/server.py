@@ -300,6 +300,14 @@ def _session_not_found(session_id: str) -> str:
             f"the active sessions)")
 
 
+# What the next reply says before the output of a command whose evaluate
+# call timed out, or was cancelled (see ACL2Session._take_unreported_output)
+TIMED_OUT_HEADING = "Output of the earlier command that timed out:"
+CANCELLED_HEADING = ("The earlier command's evaluate call was cancelled, so ACL2 "
+                     "was interrupted, and the part of the command not yet sent "
+                     "was discarded.  Its output:")
+
+
 @dataclass
 class ACL2Session:
     """
@@ -330,11 +338,14 @@ class ACL2Session:
     master_fd: Optional[int] = None
     slave_path: Optional[str] = None  # e.g. /dev/pts/3; see _flush_pty_input
     interrupt_count: int = 0  # Incremented by interrupt(); see _write_input
-    # Finishes a command whose evaluate call timed out (see _finish_command)
+    # Finishes a command whose evaluate call timed out (see _finish_command),
+    # or waits for ACL2's prompt after one that was cancelled (_cancel_command)
     _pending_send: Optional["asyncio.Task[None]"] = field(default=None, repr=False)
-    # Output of a command that timed out, from this sequence ID on, which
-    # no reply has shown yet (see _take_unreported_output)
+    # Output of a command that timed out or was cancelled, from this
+    # sequence ID on, which no reply has shown yet, and what to say about it
+    # (see _take_unreported_output)
     _unreported_from: Optional[int] = None
+    _unreported_heading: str = ""
     # The host Lisp's reader syntax (see start_session)
     syntax: reader.Syntax = reader.SBCL
     # The characters that ACL2's terminal turns into signals, and what
@@ -441,6 +452,11 @@ class ACL2Session:
                         else start_time + validated_timeout)
             log_hint = (f"  Session log: {self.log_file}"
                         if self.log_file else "")
+            # Whether some of this command may have reached ACL2, which
+            # hasn't finished it: if the call is cancelled, ACL2 is
+            # interrupted (see _cancel_command)
+            busy = False
+            start_seq_id: Optional[int] = None
 
             try:
                 # An earlier command whose evaluate call timed out may still
@@ -454,9 +470,9 @@ class ACL2Session:
                         await asyncio.wait_for(asyncio.shield(pending), remaining)
                     except asyncio.TimeoutError:
                         return ("Error: Command not sent: ACL2 is still busy "
-                                "with an earlier command that timed out.  "
-                                "Wait and try again, or call interrupt_session."
-                                + log_hint)
+                                "with an earlier command (whose evaluate call "
+                                "timed out or was cancelled).  Wait and try "
+                                "again, or call interrupt_session." + log_hint)
                 if self._unreported_from is not None:
                     await asyncio.sleep(0.05)  # let the logger catch up
                 earlier = self._take_unreported_output()
@@ -511,6 +527,7 @@ class ACL2Session:
                 # Send the command to ACL2 via the PTY master, one form at a
                 # time (see _send_units)
                 interrupts = self.interrupt_count
+                busy = True
                 unit, written, mark, outcome = await self._send_units(
                     data, cuts, 0, 0, self.candidate_seq, deadline, interrupts)
                 sent = min((cuts[unit - 1] if unit else 0) + written, len(data))
@@ -531,6 +548,7 @@ class ACL2Session:
                         self._finish_command(data, cuts, unit, written, mark,
                                              interrupts, None))
                     self._unreported_from = start_seq_id
+                    self._unreported_heading = TIMED_OUT_HEADING
                     return (earlier + f"Error: Command execution timed out "
                             f"after {validated_timeout} seconds.  ACL2 is "
                             f"still busy, and not all of the command has been "
@@ -561,10 +579,12 @@ class ACL2Session:
 
                 outcome = await self._wait_for_prompt(start_prompt_seq, deadline,
                                                       None)
+                busy = outcome == "timeout"  # (ACL2 is still working)
                 if outcome == "closed":
                     return earlier + note + await self._exited_reply(start_seq_id)
                 if outcome == "timeout":
                     self._unreported_from = start_seq_id
+                    self._unreported_heading = TIMED_OUT_HEADING
                     # If ACL2's output ends with a prompt that doesn't
                     # count, such as the deeper one of (ld *standard-oi*),
                     # ACL2 waits for input: take that as the current prompt
@@ -607,6 +627,13 @@ class ACL2Session:
                         + elide_large_output(output, self.tool_output_config,
                                              self.log_file))
 
+            except asyncio.CancelledError:
+                # The client cancelled the call, perhaps because the user
+                # interrupted the agent: stop the command, as a cancelled
+                # certify_book stops cert.pl
+                if busy and start_seq_id is not None:
+                    await self._cancel_command(start_seq_id)
+                raise
             except OSError as e:
                 if e.errno in (errno.EIO, errno.EBADF, errno.EPIPE):
                     return self._exited_message()  # (the terminal is gone)
@@ -816,8 +843,9 @@ class ACL2Session:
             return
 
     def _take_unreported_output(self) -> str:
-        """The output of a command whose evaluate call timed out, which no
-        reply has shown yet, to put before the next reply."""
+        """The output of a command whose evaluate call timed out or was
+        cancelled, which no reply has shown yet, to put before the next
+        reply."""
         start = self._unreported_from
         if start is None:
             return ""
@@ -826,10 +854,29 @@ class ACL2Session:
                          if sid > start).strip()
         if not output:
             return ""
-        return ("Output of the earlier command that timed out:\n"
+        return (self._unreported_heading + "\n"
                 + elide_large_output(output, self.tool_output_config,
                                      self.log_file)
                 + "\n\nOutput of this command:\n")
+
+    async def _cancel_command(self, start_seq_id: int) -> None:
+        """Stop a command whose evaluate call was cancelled: interrupt ACL2
+        (which discards the part of the command it hasn't read, half a
+        form included), and have the next reply say so and show ACL2's
+        output from START_SEQ_ID on.  The next command waits for ACL2's
+        prompt after the interrupt (see _pending_send)."""
+        prompt_mark = self.prompt_seq
+        try:
+            await self._send_interrupt("CALL CANCELLED")
+        except OSError:
+            return
+        self._unreported_from = start_seq_id
+        self._unreported_heading = CANCELLED_HEADING
+
+        async def wait_for_prompt() -> None:
+            await self._wait_for_prompt(prompt_mark, None, None)
+
+        self._pending_send = asyncio.create_task(wait_for_prompt())
 
     async def _write_input(self, data: memoryview, written: int,
                            deadline: Optional[float],
@@ -914,51 +961,16 @@ class ACL2Session:
             if self.exited or self.master_fd is None:
                 return self._exited_message()
 
-            # Stop any command still being written (see _write_input), and
-            # one finishing in the background (_finish_command): the rest
-            # must not follow the interrupt.  This reply shows ACL2's
-            # response, so an earlier timed-out command's output needn't
-            # come with the next one.
-            self.interrupt_count += 1
-            self._unreported_from = None
-            async with self.prompt_condition:
-                self.prompt_condition.notify_all()
-
-            # Output and prompts from here on are ACL2's response
+            # Output and prompts from here on are ACL2's response.  It
+            # shows in this reply, so an earlier timed-out command's
+            # output needn't come with the next one.
             start_seq_id = self.sequence_counter
             start_prompt_seq = self.prompt_seq
-
-            # On Linux the terminal acts on an input byte only once the
-            # input ahead of it has been read, so a Ctrl-C behind unread
-            # input would wait until ACL2 had finished its current form and
-            # read the rest.  Discarding that input first also makes room
-            # for the Ctrl-C when the input queue is full.
-            self._flush_pty_input()
-
-            # Primary method: Send Ctrl-C (0x03) through the PTY
-            # This is how a terminal delivers interrupts - the line discipline
-            # converts it to SIGINT for the foreground process group
             try:
-                os.write(self.master_fd, b"\x03")  # non-blocking fd
-                sent, marker = "Interrupt sent", "INTERRUPT SENT"
-            except OSError:
-                # PTY write failed (say, the flush failed and the input
-                # queue is still full).  Fallback method: Send SIGINT to
-                # the process group
-                try:
-                    pgid = os.getpgid(self.process.pid)
-                    os.killpg(pgid, signal.SIGINT)
-                except (ProcessLookupError, PermissionError) as e:
-                    return f"Error: Failed to interrupt session: {e}"
-                sent = "Interrupt sent (as SIGINT)"
-                marker = "INTERRUPT SENT (FALLBACK)"
-
-            # Log the interrupt in the session
-            timestamp = time.monotonic()
-            seq_id = await self._get_next_sequence_id()
-            interrupt_time = time.strftime("%Y-%m-%d %H:%M:%S")
-            await self.merge_queue.put(
-                (timestamp, seq_id, "stdout", f"[{interrupt_time} {marker}]\n"))
+                sent = await self._send_interrupt()
+            except OSError as e:
+                return f"Error: Failed to interrupt session: {e}"
+            self._unreported_from = None
 
             at_prompt = await self._wait_for_prompt(
                 start_prompt_seq, time.time() + INTERRUPT_WAIT_SECONDS,
@@ -979,6 +991,50 @@ class ACL2Session:
 
         except Exception as e:
             return f"Error: Failed to interrupt session: {e}"
+
+    async def _send_interrupt(self, note: str = "") -> str:
+        """Interrupt ACL2 like Ctrl-C, and log it (with NOTE).  Returns what
+        was sent; raises OSError if nothing could be."""
+        if self.master_fd is None:
+            raise OSError("the session's terminal is closed")
+
+        # Stop any command still being written (see _write_input), and
+        # one finishing in the background (_finish_command): the rest
+        # must not follow the interrupt.
+        self.interrupt_count += 1
+        async with self.prompt_condition:
+            self.prompt_condition.notify_all()
+
+        # On Linux the terminal acts on an input byte only once the
+        # input ahead of it has been read, so a Ctrl-C behind unread
+        # input would wait until ACL2 had finished its current form and
+        # read the rest.  Discarding that input first also makes room
+        # for the Ctrl-C when the input queue is full.
+        self._flush_pty_input()
+
+        # Primary method: Send Ctrl-C (0x03) through the PTY
+        # This is how a terminal delivers interrupts - the line discipline
+        # converts it to SIGINT for the foreground process group
+        try:
+            os.write(self.master_fd, b"\x03")  # non-blocking fd
+            sent, marker = "Interrupt sent", "INTERRUPT SENT"
+        except OSError:
+            # PTY write failed (say, the flush failed and the input
+            # queue is still full).  Fallback method: Send SIGINT to
+            # the process group
+            os.killpg(os.getpgid(self.process.pid), signal.SIGINT)
+            sent = "Interrupt sent (as SIGINT)"
+            marker = "INTERRUPT SENT (FALLBACK)"
+
+        # Log the interrupt in the session
+        if note:
+            marker = f"{marker} ({note})"
+        timestamp = time.monotonic()
+        seq_id = await self._get_next_sequence_id()
+        interrupt_time = time.strftime("%Y-%m-%d %H:%M:%S")
+        await self.merge_queue.put(
+            (timestamp, seq_id, "stdout", f"[{interrupt_time} {marker}]\n"))
+        return sent
 
     async def _get_next_sequence_id(self) -> int:
         """Get the next sequence ID for ordering output lines."""
