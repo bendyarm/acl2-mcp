@@ -183,6 +183,19 @@ def matches_prompt_pattern(text: str) -> bool:
     return False
 
 
+def last_prompt_start(text: str) -> int:
+    """Where the last prompt starts in TEXT, an unfinished line of output
+    that ends with a prompt.  Usually that is 0, but a form that prints
+    nothing leaves the next prompt on the same line ("ACL2 P>ACL2 !>"),
+    so the last ACL2 prompt starts after the >s (and spaces) of another."""
+    starts = [0] + [m.end() for m in re.finditer(r">+ *", text)
+                    if m.end() < len(text)]
+    for start in starts:
+        if _ACL2_PROMPT.fullmatch(text, start):
+            return start
+    return 0
+
+
 def validate_timeout(timeout: int | None) -> int | None:
     """
     Validate and clamp timeout value.
@@ -408,7 +421,7 @@ class ACL2Session:
     _candidate_offset: int = -1
     _candidate_sends: int = -1
     # The latest output that ended with a prompt, at any depth, as
-    # (start, end, sends, text); see _adopt_pending_prompt
+    # (start, end, sends, prompt); see _adopt_pending_prompt
     _last_prompt_like: Optional[tuple[int, int, int, str]] = None
     _total_bytes: int = 0  # bytes of output processed so far
     # When output last arrived (time.monotonic()), and _sends then
@@ -1264,15 +1277,23 @@ class ACL2Session:
             except Exception as e:
                 print(f"Error processing PTY chunk: {e}", file=sys.stderr)
 
+    def _partial_line_prompt(self, text: str) -> tuple[int, str]:
+        """Where the prompt that TEXT, partial_line_buffer decoded, ends
+        with starts in the output, and the prompt: the last one, if ACL2
+        printed several on the line (see last_prompt_start)."""
+        start = last_prompt_start(text)
+        line_start = self._total_bytes - len(self.partial_line_buffer)
+        return line_start + len(text[:start].encode()), text[start:]
+
     async def _note_prompt_candidate(self, text: str) -> None:
         """Note that the output (so far) ends with TEXT, which looks like
-        a prompt, in partial_line_buffer.  Counts it in candidate_seq if it
-        is at an allowed depth and wasn't counted already (see _send_units).
-        Called with _chunk_lock held."""
+        a prompt, in partial_line_buffer.  Counts its prompt in
+        candidate_seq if it is at an allowed depth and wasn't counted
+        already (see _send_units).  Called with _chunk_lock held."""
         end = self._total_bytes
-        start = end - len(self.partial_line_buffer)
-        self._last_prompt_like = (start, end, self._sends, text)
-        if (prompt_depth(text) <= self._confirm_max_depth
+        start, prompt = self._partial_line_prompt(text)
+        self._last_prompt_like = (start, end, self._sends, prompt)
+        if (prompt_depth(prompt) <= self._confirm_max_depth
                 and start != self._candidate_offset):
             self._candidate_offset = start
             self._candidate_sends = self._sends
@@ -1373,8 +1394,8 @@ class ACL2Session:
                 if not matches_prompt_pattern(prompt_candidate):
                     return
 
-                depth = prompt_depth(prompt_candidate)
-                start = self._total_bytes - len(self.partial_line_buffer)
+                start, prompt = self._partial_line_prompt(prompt_candidate)
+                depth = prompt_depth(prompt)
                 stale = (start != self._candidate_offset
                          or self._candidate_sends != self._sends)
                 if depth > self._confirm_max_depth or stale:
@@ -1396,7 +1417,7 @@ class ACL2Session:
                 timestamp = time.monotonic()
                 seq_id = await self._get_next_sequence_id()
                 await self.merge_queue.put((timestamp, seq_id, "stdout", prompt_candidate))
-                self.last_prompt_text = prompt_candidate
+                self.last_prompt_text = prompt
                 self.prompt_seq += 1
                 async with self.prompt_condition:
                     self.prompt_condition.notify_all()

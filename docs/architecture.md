@@ -95,7 +95,9 @@ A prompt is a candidate when ACL2's output so far ends with it (no
 newline after it).  It is confirmed once no more output arrives for
 `PROMPT_SETTLE_SECONDS` (0.2), and only at a depth (count of trailing
 `>`) no deeper than the prompt before the command, so that the prompts
-of `(ld "file")` don't end a command.
+of `(ld "file")` don't end a command.  A form that prints nothing leaves
+the next prompt on the same line (`ACL2 P>ACL2 !>`); each prompt on the
+line counts, and the last one is the prompt (`last_prompt_start`).
 
 `prompt_mode` tells how input is read at a prompt: by ACL2's reader at
 an ACL2 loop prompt (`PKG MODE>`, also in break-rewrite and a wormhole),

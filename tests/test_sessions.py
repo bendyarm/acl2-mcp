@@ -14,6 +14,7 @@ from acl2_mcp import server
 from acl2_mcp.config import ServerConfig, SessionLogConfig
 from acl2_mcp.server import (
     call_tool,
+    last_prompt_start,
     matches_prompt_pattern,
     prompt_mode,
     session_manager,
@@ -987,6 +988,37 @@ def test_prompts(prompt: str, mode: str) -> None:
     Lisp's."""
     assert matches_prompt_pattern(prompt)
     assert prompt_mode(prompt) == mode
+
+
+@pytest.mark.parametrize("line, prompt", [
+    ("ACL2 !>", "ACL2 !>"), ("ACL2 !> ", "ACL2 !> "), ("ACL2 !>>", "ACL2 !>>"),
+    ("ACL2 P>ACL2 !>", "ACL2 !>"), ("ACL2 !>>ACL2 !>>", "ACL2 !>>"),
+    ("REMORA !>REMORA !>REMORA p!>", "REMORA p!>"),
+    ("1 ACL2 >", "1 ACL2 >"), ("Wormhole ACL2 !>", "Wormhole ACL2 !>"),
+    ("v7 => ", "v7 => "), ("* ", "* "),
+])
+def test_last_prompt(line: str, prompt: str) -> None:
+    """A line of output can end with several prompts, one per form that
+    printed nothing; the last of them is the prompt."""
+    assert line[last_prompt_start(line):] == prompt
+
+
+@pytest.mark.asyncio
+async def test_prompts_on_one_line(session_id: str) -> None:
+    """Forms that print nothing leave their prompts on one line, such as
+    "ACL2 p!>ACL2 !>" or "ACL2 P>ACL2 !>".  Each prompt finishes its
+    form, and the last is the current prompt, so the next command is read
+    as ACL2 code (code that doesn't read is not sent).  If the second
+    prompt of a line were missed, evaluate would wait for its timeout,
+    then take the whole line for a prompt of some other program."""
+    for code in ["(program)\n(logic)", "(set-raw-mode-on!)\n(set-raw-mode nil)"]:
+        start = time.monotonic()
+        text = await evaluate(session_id, code + "\n(+ 1000 337)", 10)
+        assert "1337" in text and time.monotonic() - start < 5, text
+        start = time.monotonic()
+        text = await evaluate(session_id, code, 10)
+        assert time.monotonic() - start < 5, text
+        assert "Nothing was sent" in await evaluate(session_id, "(+ 1 2))")
 
 
 @pytest.mark.asyncio
